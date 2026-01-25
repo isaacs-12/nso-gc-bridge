@@ -2,6 +2,10 @@
 
 Driver for the Nintendo Switch Online GameCube Controller adapter on macOS/Linux.
 
+Demo with custom GUI:
+![Kapture 2026-01-25 at 12 02 22](https://github.com/user-attachments/assets/95aead76-7f64-4b5e-b547-c8ae1f0fb74d)
+
+
 ## Quick Start
 
 1. **Install dependencies:**
