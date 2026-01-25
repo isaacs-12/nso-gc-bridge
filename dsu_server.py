@@ -44,7 +44,7 @@ class DSUServer:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind(('127.0.0.1', self.DSU_PORT))
-            self.socket.settimeout(1.0)
+            self.socket.settimeout(0.01)  # 10ms timeout for low latency
             self.running = True
             
             # CRITICAL: Start the request handler in a background thread
@@ -325,6 +325,8 @@ class DSUServer:
         """Handle incoming DSU client requests (runs in background thread)."""
         import sys
         clients = set()  # Track connected clients
+        last_update_time = 0
+        update_interval = 1.0 / 120.0  # 120Hz = ~8.33ms for low latency
         print("Listening for Dolphin discovery packets...", flush=True)  # Debug log
         
         while self.running:
@@ -431,9 +433,22 @@ class DSUServer:
                     except Exception as e:
                         # Connection closed or error, log it
                         print(f"  -> Socket error: {e}", flush=True)
+                    
+                    # Periodically send updates to connected clients at high frequency (120Hz)
+                    # This ensures low latency even if Dolphin doesn't request frequently
+                    current_time = time.time()
+                    if self.last_state and clients and (current_time - last_update_time) >= update_interval:
+                        packet = self._create_pad_data_packet(self.last_state, pad_id=0)
+                        for client_addr in clients.copy():
+                            try:
+                                self.socket.sendto(packet, client_addr)
+                            except Exception:
+                                clients.discard(client_addr)
+                        last_update_time = current_time
             except Exception as e:
                 print(f"  -> Fatal error: {e}", flush=True)
             
-            time.sleep(0.001)  # Small delay to prevent CPU spinning
+            # Small sleep to prevent CPU spinning, but keep it minimal for responsiveness
+            time.sleep(0.0001)  # 0.1ms
         
         print("DSU request handler thread stopped", flush=True)
