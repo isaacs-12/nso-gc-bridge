@@ -2,7 +2,11 @@
 
 Driver for the Nintendo Switch Online GameCube Controller adapter on macOS/Linux.
 
-Demo with custom GUI:
+Demo within Dolphin (using the included DSU server, run with `--dsu`):
+![Kapture 2026-01-25 at 15 55 12](https://github.com/user-attachments/assets/f9b11d22-4e4e-4926-9664-cd465ae3d7bc)
+
+
+Demo with custom GUI (using the included GUI, run with `--gui`):
 ![Kapture 2026-01-25 at 12 02 22](https://github.com/user-attachments/assets/95aead76-7f64-4b5e-b547-c8ae1f0fb74d)
 
 
