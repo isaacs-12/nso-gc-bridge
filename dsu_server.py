@@ -151,6 +151,12 @@ class DSUServer:
         trigger_l = state.get('trigger_l', 0)
         trigger_r = state.get('trigger_r', 0)
         
+        # Debug: Check if buttons dictionary is correct format
+        if buttons and not hasattr(self, '_checked_button_format'):
+            print(f"     Debug: Button keys sample: {list(buttons.keys())[:5] if buttons else 'empty'}", flush=True)
+            print(f"     Debug: Button values sample: {[(k, v, type(v)) for k, v in list(buttons.items())[:3]]}", flush=True)
+            self._checked_button_format = True
+        
         # Build packet (100 bytes total)
         packet = bytearray(100)
         
@@ -195,62 +201,74 @@ class DSUServer:
         struct.pack_into('<I', packet, 32, self.packet_counter)
         
         # Buttons (byte 36-39)
-        # Byte 36: D-Pad (Left=0x01, Down=0x02, Right=0x04, Up=0x08), Options, R3, L3, Share
-        # Byte 37: Square, Cross, Circle, Triangle, R1, L1, R2Btn, L2Btn
-        # Byte 38: PS Button
-        # Byte 39: Touch Button
+        # Initialize 4 bytes of button data
+        btns = [0] * 4
         
-        button_byte_36 = 0
-        button_byte_37 = 0
-        button_byte_38 = 0
-        button_byte_39 = 0
-        
-        # Map GameCube buttons to DSU format
-        # D-Pad
-        if buttons.get('Dpad_Left', False):
-            button_byte_36 |= 0x01
-        if buttons.get('Dpad_Down', False):
-            button_byte_36 |= 0x02
-        if buttons.get('Dpad_Right', False):
-            button_byte_36 |= 0x04
+        # Byte 36: D-Pad, Options, R3, L3, Share
+        # Bits: 0:Share, 1:L3, 2:R3, 3:Options, 4:Up, 5:Right, 6:Down, 7:Left
         if buttons.get('Dpad_Up', False):
-            button_byte_36 |= 0x08
-        
-        # Options = Start
+            btns[0] |= (1 << 4)
+        if buttons.get('Dpad_Right', False):
+            btns[0] |= (1 << 5)
+        if buttons.get('Dpad_Down', False):
+            btns[0] |= (1 << 6)
+        if buttons.get('Dpad_Left', False):
+            btns[0] |= (1 << 7)
         if buttons.get('Start', False):
-            button_byte_36 |= 0x10
+            btns[0] |= (1 << 3)  # Start -> Options
         
-        # Map GameCube buttons to DualShock buttons
-        # Square = X, Cross = A, Circle = B, Triangle = Y
+        # Byte 37: Square, Cross, Circle, Triangle, R1, L1, R2, L2
+        # Bits: 0:L2, 1:R2, 2:L1, 3:R1, 4:Triangle, 5:Circle, 6:Cross, 7:Square
         if buttons.get('X', False):
-            button_byte_37 |= 0x10  # Square
+            btns[1] |= (1 << 7)  # X -> Square
         if buttons.get('A', False):
-            button_byte_37 |= 0x20  # Cross
+            btns[1] |= (1 << 6)  # A -> Cross
         if buttons.get('B', False):
-            button_byte_37 |= 0x40  # Circle
+            btns[1] |= (1 << 5)  # B -> Circle
         if buttons.get('Y', False):
-            button_byte_37 |= 0x80  # Triangle
-        
-        # R1 = R, L1 = L
+            btns[1] |= (1 << 4)  # Y -> Triangle
         if buttons.get('R', False):
-            button_byte_37 |= 0x08  # R1
+            btns[1] |= (1 << 3)  # R -> R1
         if buttons.get('L', False):
-            button_byte_37 |= 0x04  # L1
-        
-        # R2Btn = Z, L2Btn = ZL
+            btns[1] |= (1 << 2)  # L -> L1
         if buttons.get('Z', False):
-            button_byte_37 |= 0x01  # R2Btn
+            btns[1] |= (1 << 1)  # Z -> R2 (Digital)
         if buttons.get('ZL', False):
-            button_byte_37 |= 0x02  # L2Btn
+            btns[1] |= (1 << 0)  # ZL -> L2 (Digital)
         
-        # PS Button = Home
+        # Byte 38: PS Button (Home)
         if buttons.get('Home', False):
-            button_byte_38 |= 0x01
+            btns[2] |= (1 << 0)
         
-        packet[36] = button_byte_36
-        packet[37] = button_byte_37
-        packet[38] = button_byte_38
-        packet[39] = button_byte_39
+        # Byte 39: Touchpad Click (Leave as 0)
+        
+        # Assign to packet
+        packet[36:40] = btns
+        
+        # Analog buttons (bytes 44-53): Set to 255 when pressed, 0 when not
+        # Bytes 44-47: Analog D-Pad (Left, Down, Right, Up)
+        packet[44] = 255 if buttons.get('Dpad_Left', False) else 0
+        packet[45] = 255 if buttons.get('Dpad_Down', False) else 0
+        packet[46] = 255 if buttons.get('Dpad_Right', False) else 0
+        packet[47] = 255 if buttons.get('Dpad_Up', False) else 0
+        # Bytes 48-51: Analog buttons (Y/Triangle, B/Circle, A/Cross, X/Square)
+        packet[48] = 255 if buttons.get('Y', False) else 0
+        packet[49] = 255 if buttons.get('B', False) else 0
+        packet[50] = 255 if buttons.get('A', False) else 0
+        packet[51] = 255 if buttons.get('X', False) else 0
+        # Bytes 52-53: Analog R1, L1 (R, L buttons)
+        packet[52] = 255 if buttons.get('R', False) else 0
+        packet[53] = 255 if buttons.get('L', False) else 0
+        
+        # Debug: Log button bytes when any button is pressed
+        active_buttons = [k for k, v in buttons.items() if v]
+        if active_buttons:
+            # Only log occasionally to avoid spam
+            if not hasattr(self, '_button_debug_counter'):
+                self._button_debug_counter = 0
+            self._button_debug_counter += 1
+            if self._button_debug_counter <= 5 or self._button_debug_counter % 100 == 0:
+                print(f"     Debug: Buttons={active_buttons}, Byte36=0x{btns[0]:02x} ({btns[0]:08b}), Byte37=0x{btns[1]:02x} ({btns[1]:08b})", flush=True)
         
         # Sticks (bytes 40-43)
         # Convert from signed offset (difference from center) to 0-255 (centered at 128)
@@ -285,6 +303,7 @@ class DSUServer:
         packet[55] = max(0, min(255, int(trigger_r))) & 0xFF  # R2
         
         # Calculate CRC32: over whole packet (bytes 0-99) with CRC field (bytes 8-11) zeroed
+        # This matches how Pad Info packets calculate CRC
         crc_field_backup = packet[8:12]
         packet[8:12] = b'\x00\x00\x00\x00'
         crc32 = self._calculate_crc32(bytes(packet))
@@ -390,16 +409,21 @@ class DSUServer:
                             if self.last_state:
                                 packet = self._create_pad_data_packet(self.last_state, pad_id=0)
                                 self.socket.sendto(packet, addr)
-                                # Only log connection once
+                                # Only log connection once, then log occasionally
                                 if addr not in self._logged_clients:
                                     print(f"  <- Dolphin connected, streaming controller data", flush=True)
-                                    # Debug: show first packet's button/stick values
-                                    buttons = self.last_state.get('buttons', {})
-                                    sticks = self.last_state.get('sticks', {})
-                                    active_btns = [k for k, v in buttons.items() if v]
-                                    if active_btns:
-                                        print(f"     Debug: Buttons={active_btns}, Sticks=({sticks.get('main_x', 0)}, {sticks.get('main_y', 0)})", flush=True)
                                     self._logged_clients.add(addr)
+                                elif len(self._logged_clients) == 1 and len(clients) == 1:
+                                    # Log every 100th request to confirm we're responding
+                                    if not hasattr(self, '_pad_data_counter'):
+                                        self._pad_data_counter = 0
+                                    self._pad_data_counter += 1
+                                    if self._pad_data_counter % 100 == 0:
+                                        buttons = self.last_state.get('buttons', {})
+                                        active_btns = [k for k, v in buttons.items() if v]
+                                        print(f"  <- Sent pad data (request #{self._pad_data_counter}, buttons={len(active_btns)})", flush=True)
+                            else:
+                                print(f"  -> Pad Data Request but no controller state available", flush=True)
                     
                     except socket.timeout:
                         # No data, continue (this is normal)
@@ -407,18 +431,9 @@ class DSUServer:
                     except Exception as e:
                         # Connection closed or error, log it
                         print(f"  -> Socket error: {e}", flush=True)
-                    
-                    # Periodically send updates to all connected clients (~60Hz)
-                    if self.last_state and clients:
-                        packet = self._create_pad_data_packet(self.last_state, pad_id=0)
-                        for client_addr in clients.copy():
-                            try:
-                                self.socket.sendto(packet, client_addr)
-                            except Exception:
-                                clients.discard(client_addr)
             except Exception as e:
                 print(f"  -> Fatal error: {e}", flush=True)
             
-            time.sleep(0.01)  # 100Hz check rate
+            time.sleep(0.001)  # Small delay to prevent CPU spinning
         
         print("DSU request handler thread stopped", flush=True)
