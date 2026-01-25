@@ -1,0 +1,15 @@
+hidapi>=0.14.0
+pyusb>=1.2.0
+
+# GUI option (install one of these for --gui flag):
+# Option 1: For tkinter GUI (part of Python stdlib, but may need installation on macOS)
+#   On macOS: brew install python-tk
+#
+# Option 2: For PyQt5 GUI (alternative, installs via pip)
+#   pip install PyQt5
+#   Then uncomment the line below:
+# PyQt5>=5.15.0
+
+# DSU server support (for --dsu flag):
+# No additional dependencies needed - uses standard library (socket, struct, zlib)
+# Works on all platforms: macOS, Linux, Windows

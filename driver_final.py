@@ -12,6 +12,14 @@ import time
 import sys
 import threading
 
+# Import DSU server support
+try:
+    from dsu_server import DSUServer
+    DSU_AVAILABLE = True
+except ImportError:
+    DSU_AVAILABLE = False
+    DSUServer = None
+
 # Try to import GUI libraries
 GUI_AVAILABLE = False
 GUI_TYPE = None
@@ -69,7 +77,7 @@ SET_LED_DATA = [
 class NSODriver:
     """NSO GameCube Controller Driver."""
     
-    def __init__(self, use_gui=False, log_file=None):
+    def __init__(self, use_gui=False, log_file=None, use_dsu=False):
         self.usb_device = None
         self.hid_device = None
         self.running = False
@@ -80,6 +88,11 @@ class NSODriver:
         self.log_file = log_file
         self.last_log_time = 0
         self.log_interval = 1.0  # Log every 1 second
+        
+        # DSU server support (UDP-based, works on all platforms!)
+        self.dsu_server = None
+        if use_dsu and DSU_AVAILABLE:
+            self.dsu_server = DSUServer()
         
         # Calibration offsets (assume controller starts in neutral position)
         self.calibration = {
@@ -413,6 +426,14 @@ class NSODriver:
                     if parsed:
                         self.current_state = parsed
                         
+                        # Update DSU server if running (UDP-based, works on all platforms!)
+                        if self.dsu_server and self.dsu_server.running:
+                            try:
+                                self.dsu_server.update(parsed)
+                            except Exception as e:
+                                # Silently ignore DSU errors (client may not be connected)
+                                pass
+                        
                         # Log sample if logging enabled (every second, regardless of changes)
                         if self.log_file:
                             self.log_sample(data_list, parsed)
@@ -501,6 +522,16 @@ class NSODriver:
         time.sleep(0.2)  # Give device a moment to stabilize
         self.calibrate_sticks()
         
+        # Step 2.6: Start DSU server if requested (UDP-based, works on all platforms!)
+        if self.dsu_server:
+            print("\nStarting DSU server...")
+            if self.dsu_server.start():
+                print("✓ DSU server ready on 127.0.0.1:26760")
+                print("  Dolphin: Controllers > Alternate Input Sources > DSU Client")
+            else:
+                print("⚠️  DSU server failed to start - continuing without it")
+                self.dsu_server = None
+        
         # Step 3: Start reading
         self.running = True
         
@@ -551,6 +582,12 @@ class NSODriver:
     def stop(self):
         """Stop the driver."""
         self.running = False
+        
+        # Stop DSU server if running
+        if self.dsu_server:
+            self.dsu_server.stop()
+            print("✓ DSU server stopped")
+        
         if self.hid_device:
             self.hid_device.close()
         if self.usb_device:
@@ -1037,6 +1074,8 @@ def main():
     parser.add_argument('--gui', action='store_true', help='Use GUI mode (requires tkinter or PyQt5)')
     parser.add_argument('--debug', action='store_true', help='Show detailed raw byte output')
     parser.add_argument('--log', type=str, help='Log file path (logs every second with all interpretations)')
+    parser.add_argument('--dsu', action='store_true',
+                       help='Start DSU server for Dolphin (UDP-based, works on all platforms including macOS!)')
     args = parser.parse_args()
     
     # Set up log file
@@ -1088,7 +1127,7 @@ def main():
         if args.debug:
             print("Debug mode: Will show raw byte dumps")
     
-    driver = NSODriver(use_gui=use_gui, log_file=log_file)
+    driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=args.dsu)
     
     try:
         driver.start()
