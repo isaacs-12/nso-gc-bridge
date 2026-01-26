@@ -216,6 +216,8 @@ class DSUServer:
             btns[0] |= (1 << 7)
         if buttons.get('Start', False):
             btns[0] |= (1 << 3)  # Start -> Options
+        if buttons.get('Z', False):
+            btns[0] |= (1 << 2)  # Z -> R3 (Right stick click, separate from analog triggers)
         
         # Byte 37: Square, Cross, Circle, Triangle, R1, L1, R2, L2
         # Bits: 0:L2, 1:R2, 2:L1, 3:R1, 4:Triangle, 5:Circle, 6:Cross, 7:Square
@@ -231,8 +233,7 @@ class DSUServer:
             btns[1] |= (1 << 3)  # R -> R1
         if buttons.get('L', False):
             btns[1] |= (1 << 2)  # L -> L1
-        if buttons.get('Z', False):
-            btns[1] |= (1 << 1)  # Z -> R2 (Digital)
+        # Z is now mapped to R3 (byte 36, bit 2) instead of R2 to avoid conflict with analog trigger
         if buttons.get('ZL', False):
             btns[1] |= (1 << 0)  # ZL -> L2 (Digital)
         

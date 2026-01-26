@@ -79,3 +79,23 @@ The driver requires USB initialization before HID reading:
 - `pyusb` (for USB initialization)
 - Optional: `PyQt5` or `tkinter` for GUI mode
 
+## Using with Dolphin Emulator
+
+Start the driver with DSU server:
+```bash
+python3 driver_final.py --dsu
+```
+
+Configure Dolphin: Controllers → Configure → Set Device to "DSU Client" → Map buttons.
+
+The DSU server implements the Cemuhook/DSU protocol on UDP port 26760. Input mapping:
+- Main Stick → Left analog stick
+- C-Stick → Right analog stick
+- A, B, X, Y → Cross, Circle, Square, Triangle
+- L, R → L1, R1
+- Z → R3
+- ZL → L2Btn
+- Start → Options
+- Home → PS Button
+- Triggers → L2, R2 analog triggers
+
