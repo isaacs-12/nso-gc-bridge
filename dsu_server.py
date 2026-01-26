@@ -272,30 +272,56 @@ class DSUServer:
         
         # Sticks (bytes 40-43)
         # Convert from signed offset (difference from center) to 0-255 (centered at 128)
-        def stick_to_byte(value):
+        # Use circular normalization to ensure consistent magnitude regardless of direction
+        import math
+        
+        def normalize_stick_pair(x, y, max_range=1400.0):
             """
-            Convert a signed offset (difference from center) to 0-255.
-            Assumes value is roughly -2048 to +2047.
+            Normalize a stick pair (x, y) using circular normalization.
+            This ensures diagonals reach the same magnitude as cardinals.
+            
+            Args:
+                x: Signed offset in X axis
+                y: Signed offset in Y axis  
+                max_range: Maximum expected range from center
+                
+            Returns:
+                Tuple of (normalized_x, normalized_y) in range -1.0 to 1.0
             """
-            # 1. Normalize the signed offset to a -1.0 to 1.0 float
-            # We use 2000 as a divisor to give a little 'headroom' for outer edges
-            normalized = value / 2000.0
+            # Calculate magnitude (distance from center)
+            magnitude = math.sqrt(x * x + y * y)
             
-            # 2. Clamp it so it doesn't exceed 1.0 or -1.0
-            clamped = max(-1.0, min(1.0, normalized))
+            if magnitude == 0:
+                return (0.0, 0.0)
             
-            # 3. Map -1.0...1.0 to 0...255 (128 is center)
-            return int(clamped * 127 + 128) & 0xFF
+            # Normalize magnitude to 0-1 range, then clamp
+            normalized_magnitude = min(1.0, magnitude / max_range)
+            
+            # Scale both axes proportionally to maintain direction
+            # This ensures diagonals reach the same magnitude as cardinals
+            scale = normalized_magnitude / magnitude
+            normalized_x = x * scale
+            normalized_y = y * scale
+            
+            return (normalized_x, normalized_y)
+        
+        def stick_value_to_byte(normalized_value):
+            """Convert normalized value (-1.0 to 1.0) to 0-255 byte (128 is center)."""
+            return int(normalized_value * 127 + 128) & 0xFF
         
         main_x = sticks.get('main_x', 0)
         main_y = sticks.get('main_y', 0)
         c_x = sticks.get('c_x', 0)
         c_y = sticks.get('c_y', 0)
         
-        packet[40] = stick_to_byte(main_x)  # Left Stick X
-        packet[41] = stick_to_byte(-main_y)  # Left Stick Y (inverted)
-        packet[42] = stick_to_byte(c_x)      # Right Stick X
-        packet[43] = stick_to_byte(-c_y)     # Right Stick Y (inverted)
+        # Normalize each stick pair using circular normalization
+        main_norm_x, main_norm_y = normalize_stick_pair(main_x, main_y)
+        c_norm_x, c_norm_y = normalize_stick_pair(c_x, c_y)
+        
+        packet[40] = stick_value_to_byte(main_norm_x)  # Left Stick X
+        packet[41] = stick_value_to_byte(-main_norm_y)  # Left Stick Y (inverted)
+        packet[42] = stick_value_to_byte(c_norm_x)      # Right Stick X
+        packet[43] = stick_value_to_byte(-c_norm_y)     # Right Stick Y (inverted)
         
         # Triggers (bytes 54-55)
         # Ensure they are clamped 0-255
