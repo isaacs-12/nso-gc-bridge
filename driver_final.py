@@ -426,10 +426,12 @@ class NSODriver:
                     if parsed:
                         self.current_state = parsed
                         
-                        # Update DSU server if running (UDP-based, works on all platforms!)
+                        # Update DSU server if running - pass raw bytes for on-demand parsing
                         if self.dsu_server and self.dsu_server.running:
                             try:
-                                self.dsu_server.update(parsed)
+                                # Store raw bytes for on-demand parsing (reduces latency)
+                                raw_state = {'raw_bytes': data_list, 'parsed': parsed}
+                                self.dsu_server.update(raw_state)
                             except Exception as e:
                                 # Silently ignore DSU errors (client may not be connected)
                                 pass
@@ -494,9 +496,9 @@ class NSODriver:
                     if not self.use_gui:
                         print(f"\nRead error: {e}")
             
-            # Minimal sleep - removed for maximum responsiveness (HID is non-blocking)
-            # Use a tiny yield to prevent CPU spinning
-            time.sleep(0.0001)  # 0.1ms - minimal delay for CPU efficiency
+            # Yield to OS without hitting timer interrupt floor (time.sleep(0) on some systems)
+            # HID is non-blocking, so we can poll aggressively
+            time.sleep(0)  # Yield to OS scheduler
     
     def start(self):
         """Start the driver."""
