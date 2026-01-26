@@ -241,7 +241,9 @@ class DSUServer:
         if buttons.get('Home', False):
             btns[2] |= (1 << 0)
         
-        # Byte 39: Touchpad Click (Leave as 0)
+        # Byte 39: Touchpad Click (Capture -> Touchpad)
+        if buttons.get('Capture', False):
+            btns[3] |= (1 << 0)  # Capture -> Touchpad Click
         
         # Assign to packet
         packet[36:40] = btns
@@ -353,7 +355,7 @@ class DSUServer:
         import sys
         clients = set()  # Track connected clients
         last_update_time = 0
-        update_interval = 1.0 / 120.0  # 120Hz = ~8.33ms for low latency
+        update_interval = 1.0 / 250.0  # 250Hz = ~4ms for Melee-level precision
         print("Listening for Dolphin discovery packets...", flush=True)  # Debug log
         
         while self.running:
@@ -461,8 +463,8 @@ class DSUServer:
                         # Connection closed or error, log it
                         print(f"  -> Socket error: {e}", flush=True)
                     
-                    # Periodically send updates to connected clients at high frequency (120Hz)
-                    # This ensures low latency even if Dolphin doesn't request frequently
+                    # Periodically send updates to connected clients at high frequency (250Hz)
+                    # This ensures low latency and proper simultaneous button detection for Melee
                     current_time = time.time()
                     if self.last_state and clients and (current_time - last_update_time) >= update_interval:
                         packet = self._create_pad_data_packet(self.last_state, pad_id=0)
@@ -476,6 +478,7 @@ class DSUServer:
                 print(f"  -> Fatal error: {e}", flush=True)
             
             # Small sleep to prevent CPU spinning, but keep it minimal for responsiveness
-            time.sleep(0.0001)  # 0.1ms
+            # Reduced sleep for better Melee timing precision
+            time.sleep(0.00001)  # 0.01ms - minimal delay for CPU efficiency
         
         print("DSU request handler thread stopped", flush=True)
