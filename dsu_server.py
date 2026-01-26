@@ -44,7 +44,7 @@ class DSUServer:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind(('127.0.0.1', self.DSU_PORT))
-            self.socket.settimeout(0.01)  # 10ms timeout for low latency
+            self.socket.settimeout(0.001)  # 1ms timeout for maximum responsiveness
             self.running = True
             
             # CRITICAL: Start the request handler in a background thread
@@ -56,8 +56,6 @@ class DSUServer:
             time.sleep(0.1)
             
             print(f"✓ DSU Server started on 127.0.0.1:{self.DSU_PORT}", flush=True)
-            print("  Dolphin can connect via: Controllers > Alternate Input Sources > DSU Client", flush=True)
-            print("  Server ID:", self.server_id, flush=True)
             return True
         except Exception as e:
             print(f"✗ Failed to start DSU server: {e}", flush=True)
@@ -150,12 +148,6 @@ class DSUServer:
         sticks = state.get('sticks', {})
         trigger_l = state.get('trigger_l', 0)
         trigger_r = state.get('trigger_r', 0)
-        
-        # Debug: Check if buttons dictionary is correct format
-        if buttons and not hasattr(self, '_checked_button_format'):
-            print(f"     Debug: Button keys sample: {list(buttons.keys())[:5] if buttons else 'empty'}", flush=True)
-            print(f"     Debug: Button values sample: {[(k, v, type(v)) for k, v in list(buttons.items())[:3]]}", flush=True)
-            self._checked_button_format = True
         
         # Build packet (100 bytes total)
         packet = bytearray(100)
@@ -263,16 +255,6 @@ class DSUServer:
         packet[52] = 255 if buttons.get('R', False) else 0
         packet[53] = 255 if buttons.get('L', False) else 0
         
-        # Debug: Log button bytes when any button is pressed
-        active_buttons = [k for k, v in buttons.items() if v]
-        if active_buttons:
-            # Only log occasionally to avoid spam
-            if not hasattr(self, '_button_debug_counter'):
-                self._button_debug_counter = 0
-            self._button_debug_counter += 1
-            if self._button_debug_counter <= 5 or self._button_debug_counter % 100 == 0:
-                print(f"     Debug: Buttons={active_buttons}, Byte36=0x{btns[0]:02x} ({btns[0]:08b}), Byte37=0x{btns[1]:02x} ({btns[1]:08b})", flush=True)
-        
         # Sticks (bytes 40-43)
         # Convert from signed offset (difference from center) to 0-255 (centered at 128)
         # Use circular normalization to ensure consistent magnitude regardless of direction
@@ -355,8 +337,7 @@ class DSUServer:
         import sys
         clients = set()  # Track connected clients
         last_update_time = 0
-        update_interval = 1.0 / 250.0  # 250Hz = ~4ms for Melee-level precision
-        print("Listening for Dolphin discovery packets...", flush=True)  # Debug log
+        update_interval = 1.0 / 1000.0  # 1000Hz = 1ms for maximum responsiveness
         
         while self.running:
             try:
@@ -378,7 +359,6 @@ class DSUServer:
                         msg_type = struct.unpack('<I', data[16:20])[0]
                         
                         if msg_type == self.PACKET_TYPE_VERSION:
-                            print(f"  -> Version request from {addr[0]}", flush=True)
                             # Protocol Version Request (0x1000000)
                             # Respond with version info
                             packet = bytearray(24)  # 16 byte header + 8 byte payload
@@ -428,11 +408,8 @@ class DSUServer:
                                     packet = self._create_pad_info_packet(pad_id=slot_id, connected=is_connected, server_id=req_server_id)
                                     self.socket.sendto(packet, addr)
                                 
-                                # This print will confirm Dolphin is hitting your server
-                                print(f"  <- Reported Slot 0 as Connected to {addr[0]}", flush=True)
-                                
                             except Exception as e:
-                                print(f"  -> ERROR: Pad Info Response failed: {e}", flush=True)
+                                pass  # Silently ignore pad info errors
                         
                         elif msg_type == self.PACKET_TYPE_PAD_DATA:
                             # Pad Data Request (0x1000002)
@@ -440,31 +417,20 @@ class DSUServer:
                             if self.last_state:
                                 packet = self._create_pad_data_packet(self.last_state, pad_id=0)
                                 self.socket.sendto(packet, addr)
-                                # Only log connection once, then log occasionally
+                                # Log connection once
                                 if addr not in self._logged_clients:
-                                    print(f"  <- Dolphin connected, streaming controller data", flush=True)
+                                    print(f"✓ Dolphin connected", flush=True)
                                     self._logged_clients.add(addr)
-                                elif len(self._logged_clients) == 1 and len(clients) == 1:
-                                    # Log every 100th request to confirm we're responding
-                                    if not hasattr(self, '_pad_data_counter'):
-                                        self._pad_data_counter = 0
-                                    self._pad_data_counter += 1
-                                    if self._pad_data_counter % 100 == 0:
-                                        buttons = self.last_state.get('buttons', {})
-                                        active_btns = [k for k, v in buttons.items() if v]
-                                        print(f"  <- Sent pad data (request #{self._pad_data_counter}, buttons={len(active_btns)})", flush=True)
-                            else:
-                                print(f"  -> Pad Data Request but no controller state available", flush=True)
                     
                     except socket.timeout:
                         # No data, continue (this is normal)
                         pass
-                    except Exception as e:
-                        # Connection closed or error, log it
-                        print(f"  -> Socket error: {e}", flush=True)
+                    except Exception:
+                        # Connection closed or error, silently continue
+                        pass
                     
-                    # Periodically send updates to connected clients at high frequency (250Hz)
-                    # This ensures low latency and proper simultaneous button detection for Melee
+                    # Periodically send updates to connected clients at high frequency (1000Hz)
+                    # Maximum update rate for lowest latency and best mashing performance
                     current_time = time.time()
                     if self.last_state and clients and (current_time - last_update_time) >= update_interval:
                         packet = self._create_pad_data_packet(self.last_state, pad_id=0)
@@ -474,11 +440,9 @@ class DSUServer:
                             except Exception:
                                 clients.discard(client_addr)
                         last_update_time = current_time
-            except Exception as e:
-                print(f"  -> Fatal error: {e}", flush=True)
+            except Exception:
+                # Silently continue on errors
+                pass
             
-            # Small sleep to prevent CPU spinning, but keep it minimal for responsiveness
-            # Reduced sleep for better Melee timing precision
-            time.sleep(0.00001)  # 0.01ms - minimal delay for CPU efficiency
-        
-        print("DSU request handler thread stopped", flush=True)
+            # Minimal sleep for maximum responsiveness
+            time.sleep(0.000001)  # 0.001ms - minimal delay for CPU efficiency

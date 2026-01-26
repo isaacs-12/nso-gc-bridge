@@ -494,7 +494,9 @@ class NSODriver:
                     if not self.use_gui:
                         print(f"\nRead error: {e}")
             
-            time.sleep(0.001)  # Small delay
+            # Minimal sleep - removed for maximum responsiveness (HID is non-blocking)
+            # Use a tiny yield to prevent CPU spinning
+            time.sleep(0.0001)  # 0.1ms - minimal delay for CPU efficiency
     
     def start(self):
         """Start the driver."""
@@ -522,14 +524,10 @@ class NSODriver:
         time.sleep(0.2)  # Give device a moment to stabilize
         self.calibrate_sticks()
         
-        # Step 2.6: Start DSU server if requested (UDP-based, works on all platforms!)
+        # Step 2.6: Start DSU server if requested
         if self.dsu_server:
-            print("\nStarting DSU server...")
-            if self.dsu_server.start():
-                print("✓ DSU server ready on 127.0.0.1:26760")
-                print("  Dolphin: Controllers > Alternate Input Sources > DSU Client")
-            else:
-                print("⚠️  DSU server failed to start - continuing without it")
+            if not self.dsu_server.start():
+                print("⚠️  DSU server failed to start", flush=True)
                 self.dsu_server = None
         
         # Step 3: Start reading
@@ -586,7 +584,6 @@ class NSODriver:
         # Stop DSU server if running
         if self.dsu_server:
             self.dsu_server.stop()
-            print("✓ DSU server stopped")
         
         if self.hid_device:
             self.hid_device.close()
