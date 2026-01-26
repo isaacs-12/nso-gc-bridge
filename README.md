@@ -1,6 +1,6 @@
 # NSO GameCube Controller Driver
 
-Driver for the Nintendo Switch Online GameCube Controller adapter on macOS/Linux.
+Driver for the Nintendo Switch Online GameCube Controller on macOS/Linux.
 
 Demo within Dolphin (using the included DSU server, run with `--dsu`):
 ![Kapture 2026-01-25 at 19 02 18](https://github.com/user-attachments/assets/95334808-5a85-41f0-8a47-1e66ec156a3f)
