@@ -37,6 +37,12 @@ class DSUServer:
         self.last_state = None
         self.thread = None
         self._logged_clients = set()
+        # State latch: Store buttons that haven't been "seen" by Dolphin yet
+        self.pending_presses = set()
+        # Pre-allocate packet buffers to avoid GC pressure
+        self._pad_data_buffer = bytearray(100)
+        self._version_buffer = bytearray(24)
+        self._pad_info_buffer = bytearray(32)
         
     def start(self):
         """Start the DSU server and the background handler."""
@@ -44,16 +50,13 @@ class DSUServer:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind(('127.0.0.1', self.DSU_PORT))
-            self.socket.settimeout(0.001)  # 1ms timeout for high-frequency updates
+            self.socket.settimeout(0.005)  # 5ms timeout - wakes thread immediately when packet arrives
             self.running = True
             
             # CRITICAL: Start the request handler in a background thread
             self.thread = threading.Thread(target=self.handle_requests, daemon=True)
             self.thread.start()
             
-            # Give thread a moment to start
-            import time
-            time.sleep(0.1)
             
             print(f"✓ DSU Server started on 127.0.0.1:{self.DSU_PORT}", flush=True)
             return True
@@ -85,8 +88,9 @@ class DSUServer:
         if server_id is None:
             server_id = self.server_id
         
-        # Total size: 32 bytes (16 header + 4 type + 12 payload)
-        packet = bytearray(32)
+        # Use pre-allocated buffer to avoid GC pressure
+        packet = self._pad_info_buffer
+        packet[:] = b'\x00' * 32  # Clear buffer
         
         # Header
         packet[0:4] = b'DSUS'
@@ -151,13 +155,21 @@ class DSUServer:
             # Legacy mode: use already parsed state
             parsed = state
         
-        buttons = parsed.get('buttons', {})
+        # Get buttons and apply state latch - force pending presses to True
+        buttons = parsed.get('buttons', {}).copy()  # Copy to avoid modifying original
+        # Before packing buttons, force any 'pending' presses to True
+        # This ensures that even if the user released the button,
+        # we send a 'Pressed' state for at least one DSU packet.
+        for btn in list(self.pending_presses):
+            buttons[btn] = True
+        
         sticks = parsed.get('sticks', {})
         trigger_l = parsed.get('trigger_l', 0)
         trigger_r = parsed.get('trigger_r', 0)
         
-        # Build packet (100 bytes total)
-        packet = bytearray(100)
+        # Use pre-allocated buffer to avoid GC pressure
+        packet = self._pad_data_buffer
+        packet[:] = b'\x00' * 100  # Clear buffer
         
         # Header: "DSUS"
         packet[0:4] = b'DSUS'
@@ -328,113 +340,123 @@ class DSUServer:
         packet[8:12] = crc_field_backup
         struct.pack_into('<I', packet, 8, crc32)
         
+        # CLEAR the latch after creating the packet
+        # This ensures each pressed button is sent at least once
+        self.pending_presses.clear()
+        
         return bytes(packet)
+    
+    def _respond_version(self, data, addr):
+        """Respond to version request immediately."""
+        packet = self._version_buffer
+        packet[:] = b'\x00' * 24  # Clear buffer
+        # Header: "DSUS" (server response)
+        packet[0:4] = b'DSUS'
+        # Protocol version: 1001
+        struct.pack_into('<H', packet, 4, self.PROTOCOL_VERSION)
+        # Packet length: 8 (4 bytes type + 2 bytes version + 2 bytes padding)
+        struct.pack_into('<H', packet, 6, 8)
+        # Server ID (copy from request if present, otherwise use default)
+        if len(data) >= 16:
+            server_id = struct.unpack('<I', data[12:16])[0]
+        else:
+            server_id = self.server_id
+        struct.pack_into('<I', packet, 12, server_id)
+        # Message type: 0x1000000
+        struct.pack_into('<I', packet, 16, self.PACKET_TYPE_VERSION)
+        # Version: 1001
+        struct.pack_into('<H', packet, 20, self.PROTOCOL_VERSION)
+        # Padding
+        packet[22:24] = b'\x00\x00'
+        # Calculate CRC32: over whole packet (bytes 0-23) with CRC field (bytes 8-11) zeroed
+        crc_field_backup = packet[8:12]
+        packet[8:12] = b'\x00\x00\x00\x00'
+        crc = self._calculate_crc32(bytes(packet))
+        packet[8:12] = crc_field_backup
+        struct.pack_into('<I', packet, 8, crc)
+        self.socket.sendto(bytes(packet), addr)
+    
+    def _respond_pad_info(self, data, addr):
+        """Respond to pad info request immediately."""
+        try:
+            if len(data) >= 24:
+                num_slots = struct.unpack('<i', data[20:24])[0]
+                slots_to_report = [data[24+i] for i in range(num_slots)] if len(data) >= 24 + num_slots else [0]
+                req_server_id = struct.unpack('<I', data[12:16])[0] if len(data) >= 16 else self.server_id
+                
+                for slot_id in slots_to_report:
+                    # We only want Slot 0 to be our GameCube controller
+                    is_connected = (slot_id == 0)
+                    packet = self._create_pad_info_packet(pad_id=slot_id, connected=is_connected, server_id=req_server_id)
+                    self.socket.sendto(packet, addr)
+        except Exception:
+            pass  # Silently ignore pad info errors
     
     def update(self, state: Dict):
         """
         Update controller state (stored for responding to client requests).
+        Tracks button presses in a latch to ensure quick taps aren't dropped.
         
         Args:
             state: Dictionary containing buttons, sticks, triggers
         """
+        # Check for new presses and add them to the latch
+        if 'parsed' in state:
+            btns = state['parsed'].get('buttons', {})
+        else:
+            btns = state.get('buttons', {})
+        
+        # Track any newly pressed buttons
+        for btn, pressed in btns.items():
+            if pressed:
+                self.pending_presses.add(btn)
+        
         self.last_state = state
     
     def handle_requests(self):
-        """Handle incoming DSU client requests (runs in background thread). Hybrid: reactive + high-frequency periodic updates."""
+        """Handle incoming DSU client requests (runs in background thread). Prioritizes reactive mode."""
         clients = set()  # Track connected clients
         last_update_time = 0
         update_interval = 1.0 / 1000.0  # 1000Hz = 1ms for maximum responsiveness
         
         while self.running:
+            if not self.socket:
+                break
+            
             try:
-                if not self.socket:
-                    break
+                # Use socket timeout to wake thread IMMEDIATELY when packet arrives (reactive mode)
+                # This lets the OS wake the thread the MOMENT a packet arrives - lowest latency path
+                data, addr = self.socket.recvfrom(1024)
                 
-                # Check for incoming requests (non-blocking with short timeout)
-                data = None
-                try:
-                    data, addr = self.socket.recvfrom(1024)
-                except socket.timeout:
-                    # No request - continue to periodic update check below
-                    pass
-                except OSError:
-                    # Socket closed
-                    break
-                
-                # Process request if we received data
-                if data:
-                    # Need at least 20 bytes to read message type
-                    if len(data) < 20:
-                        # Skip to periodic update
-                        pass
-                    else:
-                        # Check magic bytes - Dolphin sends "DSUC" (Client -> Server)
-                        magic = data[0:4]
-                        if magic == b'DSUC':
-                            # The message type is at bytes 16-19 (Little Endian)
-                            msg_type = struct.unpack('<I', data[16:20])[0]
-                            
-                            if msg_type == self.PACKET_TYPE_VERSION:
-                                # Protocol Version Request (0x1000000)
-                                # Respond with version info
-                                packet = bytearray(24)  # 16 byte header + 8 byte payload
-                                # Header: "DSUS" (server response)
-                                packet[0:4] = b'DSUS'
-                                # Protocol version: 1001
-                                struct.pack_into('<H', packet, 4, self.PROTOCOL_VERSION)
-                                # Packet length: 8 (4 bytes type + 2 bytes version + 2 bytes padding)
-                                struct.pack_into('<H', packet, 6, 8)
-                                # CRC32 placeholder (will calculate after)
-                                # Server ID (copy from request if present, otherwise use default)
-                                if len(data) >= 16:
-                                    server_id = struct.unpack('<I', data[12:16])[0]
-                                else:
-                                    server_id = self.server_id
-                                struct.pack_into('<I', packet, 12, server_id)
-                                # Message type: 0x1000000
-                                struct.pack_into('<I', packet, 16, self.PACKET_TYPE_VERSION)
-                                # Version: 1001
-                                struct.pack_into('<H', packet, 20, self.PROTOCOL_VERSION)
-                                # Padding
-                                packet[22:24] = b'\x00\x00'
-                                # Calculate CRC32: over whole packet (bytes 0-23) with CRC field (bytes 8-11) zeroed
-                                crc_field_backup = packet[8:12]
-                                packet[8:12] = b'\x00\x00\x00\x00'
-                                crc = self._calculate_crc32(bytes(packet))
-                                packet[8:12] = crc_field_backup
-                                struct.pack_into('<I', packet, 8, crc)
+                # IMMEDIATELY process and respond - this is the lowest latency path
+                if data and len(data) >= 20:
+                    # Check magic bytes - Dolphin sends "DSUC" (Client -> Server)
+                    magic = data[0:4]
+                    if magic == b'DSUC':
+                        # The message type is at bytes 16-19 (Little Endian)
+                        msg_type = struct.unpack('<I', data[16:20])[0]
+                        
+                        if msg_type == self.PACKET_TYPE_VERSION:
+                            # Protocol Version Request - respond immediately
+                            self._respond_version(data, addr)
+                        
+                        elif msg_type == self.PACKET_TYPE_PAD_INFO:
+                            # Dolphin is asking: "Who is connected?" - respond immediately
+                            self._respond_pad_info(data, addr)
+                        
+                        elif msg_type == self.PACKET_TYPE_PAD_DATA:
+                            # Pad Data Request - SEND IMMEDIATELY (reactive mode)
+                            clients.add(addr)
+                            if self.last_state:
+                                packet = self._create_pad_data_packet(self.last_state, pad_id=0)
                                 self.socket.sendto(packet, addr)
-                            
-                            elif msg_type == self.PACKET_TYPE_PAD_INFO:
-                                # Dolphin is asking: "Who is connected?"
-                                try:
-                                    if len(data) >= 24:
-                                        num_slots = struct.unpack('<i', data[20:24])[0]
-                                        slots_to_report = [data[24+i] for i in range(num_slots)] if len(data) >= 24 + num_slots else [0]
-                                        
-                                        req_server_id = struct.unpack('<I', data[12:16])[0] if len(data) >= 16 else self.server_id
-                                        
-                                        for slot_id in slots_to_report:
-                                            # We only want Slot 0 to be our GameCube controller
-                                            is_connected = (slot_id == 0)
-                                            packet = self._create_pad_info_packet(pad_id=slot_id, connected=is_connected, server_id=req_server_id)
-                                            self.socket.sendto(packet, addr)
-                                except Exception:
-                                    pass  # Silently ignore pad info errors
-                            
-                            elif msg_type == self.PACKET_TYPE_PAD_DATA:
-                                # Pad Data Request (0x1000002) - SEND IMMEDIATELY
-                                clients.add(addr)
-                                if self.last_state:
-                                    packet = self._create_pad_data_packet(self.last_state, pad_id=0)
-                                    self.socket.sendto(packet, addr)
-                                    # Log connection once
-                                    if addr not in self._logged_clients:
-                                        print(f"✓ Dolphin connected", flush=True)
-                                        self._logged_clients.add(addr)
-                
-                # Periodic updates at high frequency (1000Hz) for low latency
-                # This ensures Dolphin always has fresh data even if it doesn't request frequently
+                                # Log connection once
+                                if addr not in self._logged_clients:
+                                    print(f"✓ Dolphin connected", flush=True)
+                                    self._logged_clients.add(addr)
+            
+            except socket.timeout:
+                # Only if no request came in, do we do the 1000Hz push logic
                 current_time = time.time()
                 if self.last_state and clients and (current_time - last_update_time) >= update_interval:
                     packet = self._create_pad_data_packet(self.last_state, pad_id=0)
@@ -445,21 +467,9 @@ class DSUServer:
                             clients.discard(client_addr)
                     last_update_time = current_time
             
+            except OSError:
+                # Socket closed
+                break
             except Exception:
-                # Silently continue on errors
+                # Silently continue on other errors
                 pass
-            
-            # Periodic updates at high frequency (1000Hz) for low latency
-            # This ensures Dolphin always has fresh data even if it doesn't request frequently
-            current_time = time.time()
-            if self.last_state and clients and (current_time - last_update_time) >= update_interval:
-                packet = self._create_pad_data_packet(self.last_state, pad_id=0)
-                for client_addr in clients.copy():
-                    try:
-                        self.socket.sendto(packet, client_addr)
-                    except Exception:
-                        clients.discard(client_addr)
-                last_update_time = current_time
-            
-            # Minimal yield to prevent CPU spinning
-            time.sleep(0)  # Yield to OS scheduler

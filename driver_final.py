@@ -150,10 +150,7 @@ class NSODriver:
             print(f"  ✓ Default report sent ({transferred} bytes)")
         except Exception as e:
             print(f"  ✗ Error sending default report: {e}")
-            return False
-        
-        time.sleep(0.1)
-        
+            return False 
         # Send LED report
         try:
             transferred = self.usb_device.write(
@@ -165,9 +162,6 @@ class NSODriver:
         except Exception as e:
             print(f"  ✗ Error sending LED report: {e}")
             return False
-        
-        time.sleep(0.1)
-        
         print("  ✓ USB initialization complete\n")
         return True
     
@@ -203,7 +197,6 @@ class NSODriver:
                         'c_x': data[9] | ((data[10] & 0x0F) << 8),
                         'c_y': (data[10] >> 4) | (data[11] << 4),
                     })
-                time.sleep(0.01)  # Small delay between samples
             except:
                 pass
         
@@ -401,19 +394,7 @@ class NSODriver:
     
     def read_loop(self):
         """Read input data from HID device."""
-        if not self.use_gui:
-            print("\nReading controller input...")
-            print("Press buttons and move sticks!")
-            if self.log_file:
-                print(f"Logging to: {self.log_file} (every {self.log_interval}s)")
-                print("Move sticks to cardinal directions (L, R, U, D) and hold each position")
-            else:
-                print("(Use --gui flag for visual interface or --log FILE to log data)")
-            print()
-        
         last_data = None
-        last_output = None
-        sample_count = 0
         
         while self.running:
             try:
@@ -445,50 +426,6 @@ class NSODriver:
                             if self.use_gui and self.gui_window:
                                 # Update GUI
                                 self.gui_window.update_state(parsed)
-                            else:
-                                # Terminal output with raw byte analysis
-                                sample_count += 1
-                                
-                                # Show raw bytes for first few samples
-                                if sample_count <= 5:
-                                    print(f"\n--- Sample {sample_count} ---")
-                                    print(f"Bytes 0-19: {' '.join([f'{b:02x}' for b in data_list[:20]])}")
-                                    print(f"Bytes 6-7 (main?): {data_list[6]:02x} {data_list[7]:02x} = ({data_list[6]}, {data_list[7]})")
-                                    print(f"Bytes 8-9:        {data_list[8]:02x} {data_list[9]:02x} = ({data_list[8]}, {data_list[9]})")
-                                    print(f"Bytes 10-11 (C?): {data_list[10]:02x} {data_list[11]:02x} = ({data_list[10]}, {data_list[11]})")
-                                    print(f"Bytes 12-13:      {data_list[12]:02x} {data_list[13]:02x} = ({data_list[12]}, {data_list[13]})")
-                                
-                                sticks = parsed.get('sticks', {})
-                                main_x = sticks.get('main_x', 0)
-                                main_y = sticks.get('main_y', 0)
-                                c_x = sticks.get('c_x', 0)
-                                c_y = sticks.get('c_y', 0)
-                                
-                                # Show all interpretations
-                                active_buttons = [name for name, pressed in parsed['buttons'].items() if pressed]
-                                
-                                output_parts = []
-                                if active_buttons:
-                                    output_parts.append(f"Buttons: {', '.join(active_buttons)}")
-                                
-                                output_parts.append(f"Main: ({main_x:+4d}, {main_y:+4d}) | C: ({c_x:+4d}, {c_y:+4d})")
-                                
-                                # Show alternative interpretations if they're different
-                                if sample_count <= 3:
-                                    alt_x = sticks.get('main_x_alt', 0)
-                                    alt_y = sticks.get('main_y_alt', 0)
-                                    if alt_x != main_x or alt_y != main_y:
-                                        output_parts.append(f"[Alt: ({alt_x:+4d}, {alt_y:+4d})]")
-                                
-                                if parsed['trigger_l'] > 5 or parsed['trigger_r'] > 5:
-                                    output_parts.append(f"Triggers: L={parsed['trigger_l']:3d} R={parsed['trigger_r']:3d}")
-                                
-                                output = " | ".join(output_parts)
-                                
-                                # Print if output changed or it's a sample
-                                if output != last_output or sample_count <= 5:
-                                    print(f"\r{output:<80}", end='', flush=True)
-                                    last_output = output
                         
                         last_data = data_list
             except Exception as e:
@@ -523,7 +460,6 @@ class NSODriver:
             return False
         
         # Step 2.5: Calibrate sticks (assume neutral position at startup)
-        time.sleep(0.2)  # Give device a moment to stabilize
         self.calibrate_sticks()
         
         # Step 2.6: Start DSU server if requested
