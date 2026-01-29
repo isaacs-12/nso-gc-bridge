@@ -1047,7 +1047,7 @@ def main():
         print("    source venv/bin/activate")
         print("    pip install PyQt5")
         print("\n  Option 2: Use system Python (has tkinter):")
-        print("    /usr/bin/python3 driver_final.py --gui")
+        print("    /usr/bin/python3 main.py --gui")
         print("    (Note: system Python may not have pyusb/hidapi)")
         print("\n  Option 3: Install python-tk for venv Python:")
         print("    brew install python-tk")

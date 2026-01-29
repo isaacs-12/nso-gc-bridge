@@ -19,17 +19,17 @@ Demo with custom GUI (using the included GUI, run with `--gui`):
 
 2. **Run the driver:**
    ```bash
-   python3 driver_final.py
+   python3 main.py
    ```
 
 3. **With GUI (optional):**
    ```bash
-   python3 driver_final.py --gui
+   python3 main.py --gui
    ```
 
 4. **Log data (optional):**
    ```bash
-   python3 driver_final.py --log stick_data.jsonl
+   python3 main.py --log stick_data.jsonl
    ```
 
 ## Usage
@@ -91,7 +91,7 @@ The driver requires USB initialization before HID reading:
 
 Start the driver with DSU server:
 ```bash
-python3 driver_final.py --dsu
+python3 main.py --dsu
 ```
 
 Configure Dolphin: Controllers → Configure → Set Device to "DSU Client" → Map buttons.
