@@ -91,6 +91,8 @@ Choose **USB** or **BLE** (for using over Bluetooth) depending on how you connec
 
 ### Option B: BLE (wireless)
 
+[Technical details in the PR where I added it](https://github.com/isaacs-12/nso-gc-bridge/pull/1)
+
 1. **Install dependencies** (includes `bleak` for BLE):
    ```bash
    pip install -r requirements.txt
