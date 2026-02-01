@@ -85,7 +85,7 @@ Choose **USB** or **BLE** (for using over Bluetooth) depending on how you connec
    Or explicitly: `python3 main.py --usb`. With GUI: `python3 main.py --gui`
 4. You should see `✓ USB device found` and `✓ Driver started successfully!` Keep this terminal open while you use the controller.
 
-*(TODO Add screenshot: Terminal showing successful USB startup if desired.)*
+<img width="632" height="397" alt="Screenshot 2026-02-01 at 12 11 18 PM" src="https://github.com/user-attachments/assets/b8acf15e-8648-41af-b0be-69450ccb9f2a" />
 
 ---
 
@@ -107,8 +107,7 @@ Choose **USB** or **BLE** (for using over Bluetooth) depending on how you connec
    ```bash
    python3 main.py --ble --address <YOUR_ADDRESS>
    ```
-
-*(TODO Add screenshot: Terminal showing BLE scan and connect if desired.)*
+<img width="670" height="381" alt="Screenshot 2026-02-01 at 12 12 17 PM" src="https://github.com/user-attachments/assets/f54b634d-de10-4e00-88b1-abae9a00c477" />
 
 ---
 
@@ -121,13 +120,21 @@ Use these steps to use the controller in Dolphin via the DSU client.
    - BLE: `python3 main.py --ble`
 2. **Open Dolphin** → **Controllers** (or **Options** → **Controller Settings**).
 
-   *(TODO Add screenshot: Dolphin main menu or Controllers entry point.)*
+<img width="912" height="740" alt="Screenshot 2026-02-01 at 12 12 58 PM" src="https://github.com/user-attachments/assets/3746a890-800c-46d4-a724-4001f138b7e8" />
+
+<img width="780" height="988" alt="Screenshot 2026-02-01 at 12 14 11 PM" src="https://github.com/user-attachments/assets/61b884c0-116d-4e73-b9c6-4093c57d74f4" />
+
 
 3. **Configure the port** you want (e.g. Port 1). Set **Device** to **DSU Client**.
 
-   *(TODO Add screenshot: Device dropdown with "DSU Client" selected.)*
+<img width="650" height="767" alt="Screenshot 2026-02-01 at 12 15 24 PM" src="https://github.com/user-attachments/assets/5d0cce35-5447-44e7-97a3-3d1e7db29784" />
 
 4. **Click Configure** for that port. Map the controller inputs to Dolphin’s buttons:
+
+<img width="780" height="988" alt="Screenshot 2026-02-01 at 12 17 43 PM" src="https://github.com/user-attachments/assets/df0f4339-eb7f-43c1-8b27-fe537ca49fd8" />
+
+<img width="914" height="723" alt="Screenshot 2026-02-01 at 12 18 43 PM" src="https://github.com/user-attachments/assets/1fde9556-3c79-4f0b-bfeb-1ef8226633ab" />
+
    - **A, B, X, Y** → face buttons (e.g. Cross, Circle, Square, Triangle)
    - **Main Stick** → left stick
    - **C-Stick** → right stick
@@ -135,13 +142,13 @@ Use these steps to use the controller in Dolphin via the DSU client.
    - **Start** → Start / Options
    - **D-pad** → D-pad
 
-   *(TODO Add screenshot: Dolphin button mapping window with DSU client.)*
 
-5. **Port:** The script’s DSU server uses **UDP port 26760**. If Dolphin asks for a port or server address, use `127.0.0.1` (or localhost) and port **26760**.
+6. **Port:** The script’s DSU server uses **UDP port 26760**. If Dolphin asks for a port or server address, use `127.0.0.1` (or localhost) and port **26760**.
 
-   *(TODO Add screenshot: Dolphin DSU/network settings if your build shows port or host.)*
+<img width="650" height="767" alt="Screenshot 2026-02-01 at 12 15 24 PM" src="https://github.com/user-attachments/assets/725c955c-fa4c-43d3-83fe-c2e57b48773b" />
 
-6. Click **OK** and start a game. The NSO controller should work as the configured DSU client.
+
+7. Click **OK** and start a game. The NSO controller should work as the configured DSU client.
 
 ---
 
