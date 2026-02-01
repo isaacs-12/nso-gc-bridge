@@ -41,6 +41,44 @@ except ImportError:
     DSU_AVAILABLE = False
     DSUServer = None
 
+# Optional virtual gamepad (normal controller input without DSU)
+# Windows: vgamepad + ViGEmBus → Xbox 360-style virtual controller
+# Linux: evdev UInput → generic gamepad
+# macOS: no virtual HID gamepad; optional keyboard emulation (pyautogui) for games that support keyboard
+VGAMEPAD_AVAILABLE = False
+EVDEV_AVAILABLE = False
+PYAUTOGUI_AVAILABLE = False
+if sys.platform == 'win32':
+    try:
+        import vgamepad as vg
+        VGAMEPAD_AVAILABLE = True
+    except ImportError:
+        vg = None
+    except Exception:
+        vg = None  # ViGEmBus not installed can cause vgamepad to fail
+elif sys.platform.startswith('linux'):
+    try:
+        import evdev
+        from evdev import UInput, ecodes
+        try:
+            from evdev import AbsInfo
+        except ImportError:
+            from evdev.device import AbsInfo
+        EVDEV_AVAILABLE = True
+    except ImportError:
+        evdev = None
+        UInput = AbsInfo = ecodes = None
+elif sys.platform == 'darwin':
+    pyautogui = None
+    try:
+        import pyautogui
+        PYAUTOGUI_AVAILABLE = True
+    except ImportError:
+        PYAUTOGUI_AVAILABLE = False
+    except Exception:
+        PYAUTOGUI_AVAILABLE = False
+        pyautogui = None
+
 # Try to import GUI libraries
 GUI_AVAILABLE = False
 GUI_TYPE = None
@@ -105,11 +143,240 @@ SET_LED_DATA = [
     0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 ]
 
+# Default stick range for dead zone (magnitude below this is zeroed)
+STICK_DEAD_ZONE_MAX_RANGE = 1400.0
+# Settings file name (cwd) or under ~/.config/nso-gc-bridge/
+SETTINGS_FILENAME = "nso_gc_settings.json"
+SETTINGS_DIR = "nso-gc-bridge"
+
+
+def _settings_path(custom_path=None):
+    """Return path to settings file: custom, or cwd, or ~/.config/nso-gc-bridge/settings.json."""
+    if custom_path:
+        return custom_path
+    import os
+    cwd = os.path.join(os.getcwd(), SETTINGS_FILENAME)
+    if os.path.isfile(cwd):
+        return cwd
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(config_home, SETTINGS_DIR, SETTINGS_FILENAME)
+
+
+def load_settings(path=None):
+    """Load settings from JSON file. Returns dict with ble_address, calibration, dead_zones or empty dict."""
+    import os
+    import json
+    p = _settings_path(path)
+    if not os.path.isfile(p):
+        return {}
+    try:
+        with open(p, "r") as f:
+            data = json.load(f)
+        return data
+    except Exception:
+        return {}
+
+
+def save_settings(ble_address=None, calibration=None, dead_zones=None, path=None):
+    """Save settings to JSON file. Pass None for values to leave unchanged (read-modify-write)."""
+    import os
+    import json
+    p = _settings_path(path)
+    data = load_settings(path) if os.path.isfile(p) else {}
+    if ble_address is not None:
+        data["ble_address"] = ble_address
+    if calibration is not None:
+        data["calibration"] = calibration
+    if dead_zones is not None:
+        data["dead_zones"] = dead_zones
+    dirname = os.path.dirname(p)
+    if dirname and not os.path.isdir(dirname):
+        os.makedirs(dirname, exist_ok=True)
+    with open(p, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+class VirtualGamepad:
+    """
+    Optional virtual gamepad so the NSO controller can be used as a normal controller
+    without DSU. Windows: vgamepad (Xbox 360 via ViGEmBus). Linux: evdev UInput.
+    macOS: keyboard emulation (pyautogui) for games that support keyboard.
+    """
+    # macOS keyboard mapping: controller -> key name for pyautogui
+    _MACOS_KEY_MAP = {
+        'A': 'space', 'B': 'z', 'X': 'x', 'Y': 'e',
+        'Start': 'enter', 'Capture': 'backspace', 'Home': 'escape',
+        'Z': 'q', 'ZL': 'shift', 'L': 'c', 'R': 'v',
+        'Dpad_Up': 'up', 'Dpad_Down': 'down', 'Dpad_Left': 'left', 'Dpad_Right': 'right',
+    }
+    _MACOS_STICK_KEYS = ('w', 's', 'a', 'd')  # main stick up, down, left, right
+    _MACOS_STICK_THRESHOLD = 0.35
+
+    def __init__(self):
+        self._vg = None
+        self._uinput = None
+        self._keyboard_emulation = False
+        self._keyboard_prev = {}  # key -> bool (was pressed last frame)
+        self._platform = sys.platform
+        if self._platform == 'win32' and VGAMEPAD_AVAILABLE and vg is not None:
+            try:
+                self._vg = vg.VX360Gamepad()
+            except Exception:
+                self._vg = None
+        elif self._platform.startswith('linux') and EVDEV_AVAILABLE and UInput is not None and ecodes is not None:
+            try:
+                cap = {
+                    ecodes.EV_ABS: [
+                        (ecodes.ABS_X, AbsInfo(0, -32768, 32767, 0, 0, 0)),
+                        (ecodes.ABS_Y, AbsInfo(0, -32768, 32767, 0, 0, 0)),
+                        (ecodes.ABS_RX, AbsInfo(0, -32768, 32767, 0, 0, 0)),
+                        (ecodes.ABS_RY, AbsInfo(0, -32768, 32767, 0, 0, 0)),
+                        (ecodes.ABS_Z, AbsInfo(0, 0, 255, 0, 0, 0)),
+                        (ecodes.ABS_RZ, AbsInfo(0, 0, 255, 0, 0, 0)),
+                        (ecodes.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                        (ecodes.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+                    ],
+                    ecodes.EV_KEY: [
+                        ecodes.BTN_A, ecodes.BTN_B, ecodes.BTN_X, ecodes.BTN_Y,
+                        ecodes.BTN_TL, ecodes.BTN_TR, ecodes.BTN_SELECT, ecodes.BTN_START,
+                        ecodes.BTN_MODE, ecodes.BTN_THUMBL, ecodes.BTN_THUMBR,
+                    ],
+                }
+                self._uinput = UInput(events=cap, name="NSO GC Bridge Virtual Gamepad")
+            except Exception:
+                self._uinput = None
+        elif self._platform == 'darwin' and PYAUTOGUI_AVAILABLE and pyautogui is not None:
+            self._keyboard_emulation = True
+            for k in list(self._MACOS_KEY_MAP.values()) + list(self._MACOS_STICK_KEYS):
+                self._keyboard_prev[k] = False
+
+    def is_active(self):
+        return self._vg is not None or self._uinput is not None or self._keyboard_emulation
+
+    def update(self, parsed):
+        """Push parsed controller state to the virtual gamepad."""
+        import math
+        buttons = parsed.get('buttons', {})
+        sticks = parsed.get('sticks', {})
+        trigger_l = parsed.get('trigger_l', 0)
+        trigger_r = parsed.get('trigger_r', 0)
+        # Normalize sticks: our offsets ~ -2048..2048 → -1..1 (use same range as DSU)
+        max_stick = STICK_DEAD_ZONE_MAX_RANGE
+        main_x = sticks.get('main_x', 0)
+        main_y = sticks.get('main_y', 0)
+        c_x = sticks.get('c_x', 0)
+        c_y = sticks.get('c_y', 0)
+        main_x_f = max(-1.0, min(1.0, main_x / max_stick))
+        main_y_f = max(-1.0, min(1.0, main_y / max_stick))
+        c_x_f = max(-1.0, min(1.0, c_x / max_stick))
+        c_y_f = max(-1.0, min(1.0, c_y / max_stick))
+        trig_l_f = trigger_l / 255.0 if trigger_l else 0.0
+        trig_r_f = trigger_r / 255.0 if trigger_r else 0.0
+
+        if self._vg is not None:
+            self._vg.reset()
+            if buttons.get('A'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+            if buttons.get('B'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+            if buttons.get('X'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+            if buttons.get('Y'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+            if buttons.get('Z'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER)
+            if buttons.get('ZL'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER)
+            if buttons.get('Start'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_START)
+            if buttons.get('Capture'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK)
+            if buttons.get('Home'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE)
+            if buttons.get('L'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB)
+            if buttons.get('R'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB)
+            if buttons.get('Dpad_Up'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+            if buttons.get('Dpad_Down'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
+            if buttons.get('Dpad_Left'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT)
+            if buttons.get('Dpad_Right'): self._vg.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
+            self._vg.left_joystick_float(main_x_f, main_y_f)
+            self._vg.right_joystick_float(c_x_f, c_y_f)
+            self._vg.left_trigger_float(trig_l_f)
+            self._vg.right_trigger_float(trig_r_f)
+            self._vg.update()
+            return
+        if self._uinput is not None and ecodes is not None:
+            # Linux evdev: write axes and keys
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_X, int(main_x_f * 32767))
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_Y, int(-main_y_f * 32767))
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_RX, int(c_x_f * 32767))
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_RY, int(-c_y_f * 32767))
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_Z, int(trig_l_f * 255))
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_RZ, int(trig_r_f * 255))
+            hat_x = (1 if buttons.get('Dpad_Right') else -1 if buttons.get('Dpad_Left') else 0)
+            hat_y = (1 if buttons.get('Dpad_Down') else -1 if buttons.get('Dpad_Up') else 0)
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_HAT0X, hat_x)
+            self._uinput.write(ecodes.EV_ABS, ecodes.ABS_HAT0Y, hat_y)
+            for ev_key, btn_name in [
+                (ecodes.BTN_A, 'A'), (ecodes.BTN_B, 'B'), (ecodes.BTN_X, 'X'), (ecodes.BTN_Y, 'Y'),
+                (ecodes.BTN_TL, 'ZL'), (ecodes.BTN_TR, 'Z'),
+                (ecodes.BTN_SELECT, 'Capture'), (ecodes.BTN_START, 'Start'),
+                (ecodes.BTN_MODE, 'Home'), (ecodes.BTN_THUMBL, 'L'), (ecodes.BTN_THUMBR, 'R'),
+            ]:
+                self._uinput.write(ecodes.EV_KEY, ev_key, 1 if buttons.get(btn_name) else 0)
+            self._uinput.syn()
+            return
+        if self._keyboard_emulation and pyautogui is not None:
+            # macOS: keyboard emulation for games that support keyboard
+            keys_now = set()
+            for btn_name, key in self._MACOS_KEY_MAP.items():
+                if buttons.get(btn_name):
+                    keys_now.add(key)
+            if main_y_f > self._MACOS_STICK_THRESHOLD:
+                keys_now.add(self._MACOS_STICK_KEYS[0])  # w
+            if main_y_f < -self._MACOS_STICK_THRESHOLD:
+                keys_now.add(self._MACOS_STICK_KEYS[1])  # s
+            if main_x_f < -self._MACOS_STICK_THRESHOLD:
+                keys_now.add(self._MACOS_STICK_KEYS[2])  # a
+            if main_x_f > self._MACOS_STICK_THRESHOLD:
+                keys_now.add(self._MACOS_STICK_KEYS[3])  # d
+            all_keys = set(self._keyboard_prev) | keys_now
+            for k in all_keys:
+                prev = self._keyboard_prev.get(k, False)
+                now = k in keys_now
+                if now and not prev:
+                    try:
+                        pyautogui.keyDown(k)
+                    except Exception:
+                        pass
+                elif not now and prev:
+                    try:
+                        pyautogui.keyUp(k)
+                    except Exception:
+                        pass
+                self._keyboard_prev[k] = now
+
+    def close(self):
+        if self._vg is not None:
+            try:
+                self._vg.reset()
+                self._vg.update()
+            except Exception:
+                pass
+            self._vg = None
+        if self._uinput is not None:
+            try:
+                self._uinput.close()
+            except Exception:
+                pass
+            self._uinput = None
+        if self._keyboard_emulation and pyautogui is not None:
+            for k, pressed in self._keyboard_prev.items():
+                if pressed:
+                    try:
+                        pyautogui.keyUp(k)
+                    except Exception:
+                        pass
+            self._keyboard_prev.clear()
+            self._keyboard_emulation = False
+
 
 class NSODriver:
     """NSO GameCube Controller Driver."""
     
-    def __init__(self, use_gui=False, log_file=None, use_dsu=False):
+    def __init__(self, use_gui=False, log_file=None, use_dsu=False, use_virtual_gamepad=False,
+                 settings_path=None, save_settings_on_exit=False):
         self.usb_device = None
         self.hid_device = None
         self.running = False
@@ -120,20 +387,58 @@ class NSODriver:
         self.log_file = log_file
         self.last_log_time = 0
         self.log_interval = 1.0  # Log every 1 second
+        self.settings_path = settings_path
+        self.save_settings_on_exit = save_settings_on_exit
         
         # DSU server support (UDP-based, works on all platforms!)
         self.dsu_server = None
         if use_dsu and DSU_AVAILABLE:
             self.dsu_server = DSUServer()
         
-        # Calibration offsets (assume controller starts in neutral position)
+        # Virtual gamepad (normal controller input without DSU): Windows vgamepad, Linux evdev
+        self.virtual_gamepad = None
+        self._virtual_gamepad_requested = use_virtual_gamepad
+        if use_virtual_gamepad:
+            if VGAMEPAD_AVAILABLE or EVDEV_AVAILABLE or PYAUTOGUI_AVAILABLE:
+                vgpad = VirtualGamepad()
+                if vgpad.is_active():
+                    self.virtual_gamepad = vgpad
+                else:
+                    vgpad.close()
+        
+        # Calibration: center (required for offset), optional min/max for full range (like NSO-Gamecube-Bluetooth-Connector)
         self.calibration = {
             'main_x_center': None,
             'main_y_center': None,
             'c_x_center': None,
             'c_y_center': None,
+            'main_x_min': None, 'main_x_max': None,
+            'main_y_min': None, 'main_y_max': None,
+            'c_x_min': None, 'c_x_max': None,
+            'c_y_min': None, 'c_y_max': None,
+            'trigger_l_min': None, 'trigger_l_max': None,
+            'trigger_r_min': None, 'trigger_r_max': None,
             'calibrated': False
         }
+        # Dead zones (0.0–0.5 typical; applied after calibration)
+        self.dead_zones = {
+            'left_stick': 0.05,
+            'c_stick': 0.05,
+            'trigger': 0.02,
+        }
+        # Load from settings file if present (cwd or ~/.config/nso-gc-bridge when path not set)
+        loaded = load_settings(settings_path)
+        if loaded:
+            cal = loaded.get('calibration', {})
+            for k, v in cal.items():
+                if k in self.calibration and v is not None:
+                    self.calibration[k] = v
+            if cal.get('main_x_center') is not None:
+                self.calibration['calibrated'] = True
+            dz = loaded.get('dead_zones', {})
+            for k, v in dz.items():
+                if k in self.dead_zones and v is not None:
+                    self.dead_zones[k] = float(v)
         
     def find_usb_device(self):
         """Find USB device and get endpoints."""
@@ -385,13 +690,40 @@ class NSODriver:
                 'main_x': 0, 'main_y': 0, 'c_x': 0, 'c_y': 0,
             }
 
-        return {
+        result = {
             'buttons': buttons,
             'trigger_l': trigger_l,
             'trigger_r': trigger_r,
             'sticks': sticks,
             'raw': data
         }
+        self._apply_dead_zones(result)
+        return result
+
+    def _apply_dead_zones(self, parsed):
+        """Zero stick and trigger outputs when within dead zone (learned from NSO-Gamecube-Bluetooth-Connector)."""
+        import math
+        sticks = parsed.get('sticks', {})
+        if not sticks:
+            return
+        # Left stick: magnitude below threshold -> zero
+        dz_left = self.dead_zones.get('left_stick', 0.05) * STICK_DEAD_ZONE_MAX_RANGE
+        mx, my = sticks.get('main_x', 0), sticks.get('main_y', 0)
+        if math.sqrt(mx * mx + my * my) < dz_left:
+            sticks['main_x'] = sticks['main_y'] = 0
+            sticks['main_x_offset'] = sticks['main_y_offset'] = 0
+        # C-stick
+        dz_c = self.dead_zones.get('c_stick', 0.05) * STICK_DEAD_ZONE_MAX_RANGE
+        cx, cy = sticks.get('c_x', 0), sticks.get('c_y', 0)
+        if math.sqrt(cx * cx + cy * cy) < dz_c:
+            sticks['c_x'] = sticks['c_y'] = 0
+            sticks['c_x_offset'] = sticks['c_y_offset'] = 0
+        # Triggers: value below threshold -> 0
+        dz_trig = self.dead_zones.get('trigger', 0.02) * 255
+        if parsed.get('trigger_l', 0) < dz_trig:
+            parsed['trigger_l'] = 0
+        if parsed.get('trigger_r', 0) < dz_trig:
+            parsed['trigger_r'] = 0
 
     def _stick_12bit_from_bytes(self, b0, b1, b2):
         """Decode 12-bit nibble-packed stick axis from 3 bytes (Nintendo standard)."""
@@ -482,6 +814,12 @@ class NSODriver:
                             except Exception as e:
                                 # Silently ignore DSU errors (client may not be connected)
                                 pass
+                        # Update virtual gamepad (normal controller input without DSU)
+                        if self.virtual_gamepad and self.virtual_gamepad.is_active():
+                            try:
+                                self.virtual_gamepad.update(parsed)
+                            except Exception:
+                                pass
                         
                         # Log sample if logging enabled (every second, regardless of changes)
                         if self.log_file:
@@ -533,6 +871,23 @@ class NSODriver:
             if not self.dsu_server.start():
                 print("⚠️  DSU server failed to start", flush=True)
                 self.dsu_server = None
+        if self.virtual_gamepad and self.virtual_gamepad.is_active():
+            if getattr(self.virtual_gamepad, '_keyboard_emulation', False):
+                print("✓ Virtual gamepad active (keyboard emulation; for games that support keyboard)", flush=True)
+                print("  macOS: Grant Accessibility permission to Terminal/app if keys don't register.", flush=True)
+            else:
+                print("✓ Virtual gamepad active (normal controller input)", flush=True)
+        elif getattr(self, '_virtual_gamepad_requested', False):
+            print("⚠️  Virtual gamepad requested but not available.", flush=True)
+            if sys.platform == 'darwin':
+                print("  macOS: Install with the same Python you use to run this script:", flush=True)
+                print("    python -m pip install pyautogui", flush=True)
+                try:
+                    import pyautogui
+                except Exception as e:
+                    print(f"  (Import failed: {e})", flush=True)
+            else:
+                print("  Windows: pip install vgamepad + ViGEmBus; Linux: pip install evdev", flush=True)
         
         # Step 3: Start reading
         self.running = True
@@ -581,6 +936,10 @@ class NSODriver:
         
         return True
     
+    def _get_calibration_for_save(self):
+        """Return calibration dict for settings file (only non-None values)."""
+        return {k: v for k, v in self.calibration.items() if v is not None}
+
     def stop(self):
         """Stop the driver."""
         self.running = False
@@ -597,6 +956,15 @@ class NSODriver:
                 usb.util.dispose_resources(self.usb_device)
             except:
                 pass
+        if self.virtual_gamepad:
+            self.virtual_gamepad.close()
+            self.virtual_gamepad = None
+        if self.save_settings_on_exit:
+            save_settings(
+                calibration=self._get_calibration_for_save(),
+                dead_zones=self.dead_zones,
+                path=self.settings_path
+            )
         print("\nDriver stopped")
 
 
@@ -907,6 +1275,7 @@ class NSOWirelessDriver(NSODriver):
             parsed = self.parse_input(data_list, report_id_offset=self.report_id_offset, ble_layout=False)
         if not parsed:
             return
+        self._apply_dead_zones(parsed)
 
         # Deferred calibration from parsed stick raw values (median over 50 samples, skip first few reports)
         if not self.calibration['calibrated'] and 'sticks' in parsed and 'main_x_raw' in parsed['sticks']:
@@ -935,6 +1304,11 @@ class NSOWirelessDriver(NSODriver):
             try:
                 raw_state = {'raw_bytes': data_list, 'parsed': parsed}
                 self.dsu_server.update(raw_state)
+            except Exception:
+                pass
+        if self.virtual_gamepad and self.virtual_gamepad.is_active():
+            try:
+                self.virtual_gamepad.update(parsed)
             except Exception:
                 pass
 
@@ -1207,6 +1581,23 @@ class NSOWirelessDriver(NSODriver):
         if self.dsu_server and not self.dsu_server.start():
             print("⚠️  DSU server failed to start", flush=True)
             self.dsu_server = None
+        if self.virtual_gamepad and self.virtual_gamepad.is_active():
+            if getattr(self.virtual_gamepad, '_keyboard_emulation', False):
+                print("✓ Virtual gamepad active (keyboard emulation; for games that support keyboard)", flush=True)
+                print("  macOS: Grant Accessibility permission to Terminal/app if keys don't register.", flush=True)
+            else:
+                print("✓ Virtual gamepad active (normal controller input)", flush=True)
+        elif getattr(self, '_virtual_gamepad_requested', False):
+            print("⚠️  Virtual gamepad requested but not available.", flush=True)
+            if sys.platform == 'darwin':
+                print("  macOS: Install with the same Python you use to run this script:", flush=True)
+                print("    python -m pip install pyautogui", flush=True)
+                try:
+                    import pyautogui
+                except Exception as e:
+                    print(f"  (Import failed: {e})", flush=True)
+            else:
+                print("  Windows: pip install vgamepad + ViGEmBus; Linux: pip install evdev", flush=True)
 
         self.running = True
 
@@ -1260,17 +1651,9 @@ class NSOWirelessDriver(NSODriver):
     def stop(self):
         """Stop the wireless driver."""
         self.running = False
-        if self.dsu_server:
-            self.dsu_server.stop()
-        if self.hid_device:
-            self.hid_device.close()
-        if self.usb_device:
-            try:
-                usb.util.release_interface(self.usb_device, INTERFACE_NUM)
-                usb.util.dispose_resources(self.usb_device)
-            except Exception:
-                pass
-        print("\nDriver stopped")
+        if self.save_settings_on_exit and getattr(self, 'address', None):
+            save_settings(ble_address=self.address, path=getattr(self, 'settings_path', None))
+        super().stop()
 
 
 class StickWidget:
@@ -1769,6 +2152,12 @@ def main():
                        help='Two scans in one run: first with controller ON (pairing mode), then OFF. Prints the address that disappeared (your controller).')
     parser.add_argument('--ble-discover', action='store_true',
                        help='Interactive BLE calibration: prompts for each button/stick; logs raw byte changes. Use with --ble (--address optional).')
+    parser.add_argument('--settings', type=str, default=None,
+                       help='Path to settings JSON (default: cwd or ~/.config/nso-gc-bridge). Loads calibration, dead zones, BLE address.')
+    parser.add_argument('--save-settings', action='store_true',
+                       help='Save calibration, dead zones, and (for BLE) controller address to settings file on exit.')
+    parser.add_argument('--virtual-gamepad', action='store_true',
+                       help='Expose controller as a normal gamepad (Windows: vgamepad/ViGEmBus; Linux: evdev/uinput). Use with --no-dsu for games that do not use DSU.')
     args = parser.parse_args()
     
     # Set up log file
@@ -1916,6 +2305,18 @@ def main():
         print("✗ --ble-discover requires --ble. Use: python main.py --ble --ble-discover")
         return 1
 
+    settings_path = getattr(args, 'settings', None)
+    save_settings_on_exit = getattr(args, 'save_settings', False)
+    use_virtual_gamepad = getattr(args, 'virtual_gamepad', False)
+    driver_kw = dict(
+        use_gui=use_gui,
+        log_file=log_file,
+        use_dsu=not getattr(args, 'no_dsu', False),
+        use_virtual_gamepad=use_virtual_gamepad,
+        settings_path=settings_path,
+        save_settings_on_exit=save_settings_on_exit,
+    )
+
     if args.ble:
         if not BLE_AVAILABLE:
             print("✗ --ble requires bleak. Run: pip install bleak")
@@ -1924,9 +2325,13 @@ def main():
             except Exception as e:
                 print(f"  (import failed: {e})")
             return 1
+        # BLE address: CLI, then settings file, then None (auto-discover)
+        ble_address = args.address
+        if not ble_address and (settings_path or load_settings() != {}):
+            ble_address = load_settings(settings_path).get('ble_address') or None
         # DSU enabled by default with BLE so Dolphin can use the controller without --dsu
         driver = NSOWirelessDriver(
-            args.address,
+            ble_address,
             report_id_offset=args.ble_report_offset,
             ble_report_layout=args.ble_report_layout,
             ble_debug=args.ble_debug,
@@ -1934,9 +2339,12 @@ def main():
             use_gui=use_gui if not getattr(args, 'ble_discover', False) else False,
             log_file=log_file,
             use_dsu=not getattr(args, 'no_dsu', False) and not getattr(args, 'ble_discover', False),
+            use_virtual_gamepad=use_virtual_gamepad,
+            settings_path=settings_path,
+            save_settings_on_exit=save_settings_on_exit,
         )
     else:
-        driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=not getattr(args, 'no_dsu', False))
+        driver = NSODriver(**driver_kw)
 
     try:
         driver.start()

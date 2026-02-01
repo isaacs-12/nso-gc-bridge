@@ -13,6 +13,12 @@ bleak>=0.21.0
 #   Then uncomment the line below:
 # PyQt5>=5.15.0
 
-# DSU server support (for --dsu flag):
+# DSU server support (for Dolphin):
 # No additional dependencies needed - uses standard library (socket, struct, zlib)
 # Works on all platforms: macOS, Linux, Windows
+
+# Virtual gamepad (normal controller without DSU, for --virtual-gamepad):
+# Windows: pip install vgamepad  (requires ViGEmBus: https://github.com/nefarius/ViGEmBus/releases)
+# Linux:   pip install evdev     (Linux only; needs kernel headers. May need: sudo usermod -aG input $USER)
+# macOS:   pip install pyautogui  (keyboard emulation for games that support keyboard; not a real virtual gamepad)
+#         For a real virtual HID gamepad on Mac you would need foohid (unsupported kext, not recommended)
