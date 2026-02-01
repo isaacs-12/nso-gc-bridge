@@ -12,14 +12,62 @@ Demo with custom GUI (using the included GUI, run with `--gui`):
 
 ---
 
+## Download the tool and open Terminal
+
+Do this once before setting up the controller.
+
+### 1. Download the tool to your computer (if you're not familiar with `git` this will help you at least use this tool)
+
+- **Option A (easiest):** On this GitHub page, click the green **Code** button → **Download ZIP**. Unzip the folder (e.g. double‑click it). You’ll get a folder named something like `nso-gc-bridge-main`.
+- **Option B:** If you use Git, run: `git clone https://github.com/YOUR_USERNAME/nso-gc-bridge.git` (replace with the real repo URL) and `cd nso-gc-bridge`.
+
+Put the folder somewhere you can find it (e.g. **Downloads** or **Documents**). Remember the full path (e.g. `~/Downloads/nso-gc-bridge-main`).
+
+### 2. Open Terminal (the place where you’ll run the commands)
+
+- **macOS:** Press **Cmd + Space**, type **Terminal**, press Enter. Or open **Applications → Utilities → Terminal**.
+- **Linux:** Open your app menu and search for **Terminal** (or **Konsole**, **GNOME Terminal**, etc.).
+
+A window will open with a prompt (e.g. `yourname@computer ~ %`). All the commands below are typed here and run when you press **Enter**.
+
+### 3. Go into the tool’s folder
+
+In Terminal, type this (replace the path with **your** folder path if it’s different):
+
+```bash
+cd ~/Downloads/nso-gc-bridge-main
+```
+
+If you put the folder somewhere else (e.g. Desktop), use that path instead, for example:
+
+```bash
+cd ~/Desktop/nso-gc-bridge-main
+```
+
+After you press Enter, you’re “inside” the folder. Every time you open a **new** Terminal window, you’ll need to run this `cd` command again before running the driver.
+
+### 4. Check Python (optional)
+
+The driver needs **Python 3**. To see if it’s installed, run:
+
+```bash
+python3 --version
+```
+
+You should see something like `Python 3.10.x` or `Python 3.11.x`. If you get “command not found”, install Python from [python.org](https://www.python.org/downloads/) or your system’s package manager first.
+
+---
+
 ## Part 1: Script & controller setup
 
 Choose **USB** or **BLE** (for using over Bluetooth) depending on how you connect the controller.
 
+**Run all commands in Terminal, from inside the tool’s folder** (the `cd` step above).
+
 ### Prerequisites
 
-- **Python 3.7+** and **pip**
-- **macOS:** For BLE, allow **Bluetooth** for Terminal (or your Python app) in **System Settings → Privacy & Security → Bluetooth**
+- **Python 3.7+** and **pip** (see “Check Python” above if needed).
+- **macOS:** For BLE, allow **Bluetooth** for Terminal in **System Settings → Privacy & Security → Bluetooth** when prompted.
 
 ---
 
