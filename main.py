@@ -11,6 +11,25 @@ import hid
 import time
 import sys
 import threading
+import asyncio
+
+# Optional BLE support (for wireless controller not visible as HID)
+try:
+    from bleak import BleakClient, BleakScanner
+    BLE_AVAILABLE = True
+except ImportError:
+    BLE_AVAILABLE = False
+    BleakClient = None
+    BleakScanner = None
+
+# Retry interval when waiting for controller to become connectable (seconds)
+BLE_CONNECT_RETRY_SEC = 2.0
+# How long to scan when using --ble-scan (seconds)
+BLE_SCAN_DURATION_SEC = 15
+# Shorter scan per leg when using --ble-scan-diff (seconds)
+BLE_SCAN_DIFF_DURATION_SEC = 8
+# Timeout per candidate when trying handshake in --ble-scan-diff (seconds). Keep short so pairing mode stays active.
+BLE_HANDSHAKE_TRY_TIMEOUT_SEC = 1.5
 
 # Import DSU server support
 try:
@@ -61,6 +80,17 @@ except ImportError:
 VID = 0x057e
 PID = 0x2073
 INTERFACE_NUM = 1
+
+# Nintendo BLE: standard HID Report characteristic (read = notifications, write = output/command)
+HID_REPORT_UUID = "00002a4d-0000-1000-8000-00805f9b34fb"
+
+# BlueRetro-style BLE handshake for Nintendo SW2/GC (PID 0x2073): READ_SPI command to wake/init.
+# See BlueRetro main/bluetooth/hidp/sw2.c SW2_INIT_STATE_READ_INFO.
+# First byte 0x02=CMD_READ_SPI, 0x91=REQ_TYPE_REQ, 0x01=REQ_INT_BLE, 0x04=SUBCMD_READ_SPI, then payload.
+BLE_HANDSHAKE_READ_SPI = bytearray([
+    0x02, 0x91, 0x01, 0x04,
+    0x00, 0x08, 0x00, 0x00, 0x40, 0x7e, 0x00, 0x00, 0x00, 0x30, 0x01, 0x00
+])
 
 # Initialization data discovered by the community
 DEFAULT_REPORT_DATA = [
@@ -216,34 +246,39 @@ class NSODriver:
         print(f"    C-stick center: X={self.calibration['c_x_center']}, Y={self.calibration['c_y_center']}")
         return True
     
-    def parse_input(self, data):
-        """Parse HID input data based on discovered format."""
-        if len(data) < 12:  # Need at least 12 bytes for sticks (bytes 6-11)
+    def parse_input(self, data, report_id_offset=0):
+        """Parse HID input data based on discovered format.
+
+        report_id_offset: If BLE strips the Report ID as first byte, pass 1 so
+                          indices shift (e.g. buttons at data[4], data[5], data[6]).
+        """
+        o = report_id_offset
+        if len(data) < 12 + o:  # Need at least 12 bytes for sticks (bytes 6-11) after offset
             return None
-        
+
         # Button mapping (from discovered format)
         buttons = {
-            'B': (data[3] & 0x01) != 0,
-            'A': (data[3] & 0x02) != 0,
-            'Y': (data[3] & 0x04) != 0,
-            'X': (data[3] & 0x08) != 0,
-            'R': (data[3] & 0x10) != 0,
-            'Z': (data[3] & 0x20) != 0,
-            'Start': (data[3] & 0x40) != 0,
-            'Dpad_Down': (data[4] & 0x01) != 0,
-            'Dpad_Right': (data[4] & 0x02) != 0,
-            'Dpad_Left': (data[4] & 0x04) != 0,
-            'Dpad_Up': (data[4] & 0x08) != 0,
-            'L': (data[4] & 0x10) != 0,
-            'ZL': (data[4] & 0x20) != 0,
-            'Home': (data[5] & 0x01) != 0,
-            'Capture': (data[5] & 0x02) != 0,
+            'B': (data[3 + o] & 0x01) != 0,
+            'A': (data[3 + o] & 0x02) != 0,
+            'Y': (data[3 + o] & 0x04) != 0,
+            'X': (data[3 + o] & 0x08) != 0,
+            'R': (data[3 + o] & 0x10) != 0,
+            'Z': (data[3 + o] & 0x20) != 0,
+            'Start': (data[3 + o] & 0x40) != 0,
+            'Dpad_Down': (data[4 + o] & 0x01) != 0,
+            'Dpad_Right': (data[4 + o] & 0x02) != 0,
+            'Dpad_Left': (data[4 + o] & 0x04) != 0,
+            'Dpad_Up': (data[4 + o] & 0x08) != 0,
+            'L': (data[4 + o] & 0x10) != 0,
+            'ZL': (data[4 + o] & 0x20) != 0,
+            'Home': (data[5 + o] & 0x01) != 0,
+            'Capture': (data[5 + o] & 0x02) != 0,
         }
-        
+
         # Analog triggers (bytes 13 and 14) - restore original working positions
-        trigger_l = data[13] if len(data) > 13 else 0
-        trigger_r = data[14] if len(data) > 14 else 0
-        
+        trigger_l = data[13 + o] if len(data) > 13 + o else 0
+        trigger_r = data[14 + o] if len(data) > 14 + o else 0
+
         # Sticks - Switch HID protocol uses 12-bit nibble-packed values
         # Each stick axis is 12 bits (0-4095), packed into 3 bytes per 2 axes
         # Main stick: bytes 6-8 (X and Y packed)
@@ -260,23 +295,23 @@ class NSODriver:
         # 1. Extract 12-bit values from nibble-packed bytes (0-4095)
         # 2. Subtract calibration center (typically 2048 = 2^11) to get offset from neutral
         # 3. Result is signed integer (-2048 to +2047), no wrapping needed
-        
-        if len(data) >= 12:
+
+        if len(data) >= 12 + o:
             # STEP 1: Extract 12-bit values from nibble-packed bytes
             # Main Stick (Left Stick) extraction
             # Byte 6: Lower 8 bits of X
             # Byte 7: Upper 4 bits of X (low nibble), Lower 4 bits of Y (high nibble)
             # Byte 8: Upper 8 bits of Y
-            main_x_raw = data[6] | ((data[7] & 0x0F) << 8)
-            main_y_raw = (data[7] >> 4) | (data[8] << 4)
-            
+            main_x_raw = data[6 + o] | ((data[7 + o] & 0x0F) << 8)
+            main_y_raw = (data[7 + o] >> 4) | (data[8 + o] << 4)
+
             # C-Stick (Right Stick) extraction
             # Byte 9: Lower 8 bits of X
             # Byte 10: Upper 4 bits of X (low nibble), Lower 4 bits of Y (high nibble)
             # Byte 11: Upper 8 bits of Y
-            c_x_raw = data[9] | ((data[10] & 0x0F) << 8)
-            c_y_raw = (data[10] >> 4) | (data[11] << 4)
-            
+            c_x_raw = data[9 + o] | ((data[10 + o] & 0x0F) << 8)
+            c_y_raw = (data[10 + o] >> 4) | (data[11 + o] << 4)
+
             # STEP 2: Apply calibration - subtract center to get offset from neutral
             if self.calibration['calibrated']:
                 # Subtract measured center (12-bit value, typically around 2048)
@@ -290,33 +325,33 @@ class NSODriver:
                 main_y = main_y_raw - 2048
                 c_x = c_x_raw - 2048
                 c_y = c_y_raw - 2048
-            
+
             # STEP 3: Final output (no Y inversion needed - controller already outputs correct direction)
             sticks = {
                 # Main stick: Use calibrated values directly
                 'main_x': main_x,
                 'main_y': main_y,  # No inversion needed
-                
+
                 # C-stick: Use calibrated values directly
                 'c_x': c_x,
                 'c_y': c_y,  # No inversion needed
-                
+
                 # Store raw 12-bit values for debugging
                 'main_x_raw': main_x_raw,
                 'main_y_raw': main_y_raw,
                 'c_x_raw': c_x_raw,
                 'c_y_raw': c_y_raw,
-                
+
                 # Store calibrated offsets for debugging
                 'main_x_offset': main_x,
                 'main_y_offset': main_y,
                 'c_x_offset': c_x,
                 'c_y_offset': c_y,
-                
+
                 # Raw bytes for debugging
                 'raw_bytes': {
-                    'main': [data[6], data[7], data[8]],
-                    'c': [data[9], data[10], data[11]],
+                    'main': [data[6 + o], data[7 + o], data[8 + o]],
+                    'c': [data[9 + o], data[10 + o], data[11 + o]],
                 },
             }
         else:
@@ -324,7 +359,7 @@ class NSODriver:
             sticks = {
                 'main_x': 0, 'main_y': 0, 'c_x': 0, 'c_y': 0,
             }
-        
+
         return {
             'buttons': buttons,
             'trigger_l': trigger_l,
@@ -530,6 +565,211 @@ class NSODriver:
                 usb.util.release_interface(self.usb_device, INTERFACE_NUM)
                 usb.util.dispose_resources(self.usb_device)
             except:
+                pass
+        print("\nDriver stopped")
+
+
+class NSOWirelessDriver(NSODriver):
+    """NSO GameCube Controller over BLE (wireless). Use when controller does not show as HID."""
+
+    def __init__(self, mac_address, report_id_offset=0, **kwargs):
+        super().__init__(**kwargs)
+        self.address = mac_address
+        self.report_id_offset = report_id_offset
+        self._ble_calibration_samples = []
+        self._ble_loop = None
+
+    def read_loop(self):
+        """No-op for BLE: data comes via notifications. Keeps GUI/thread layout unchanged."""
+        while self.running:
+            time.sleep(0.1)
+
+    def _notification_handler(self, sender, data):
+        """Handle BLE input report notifications (replaces HID read)."""
+        data_list = list(data)
+        parsed = self.parse_input(data_list, report_id_offset=self.report_id_offset)
+        if not parsed:
+            return
+
+        # Deferred calibration: collect first 10 samples then set center
+        if not self.calibration['calibrated'] and len(data_list) >= 12 + self.report_id_offset:
+            o = self.report_id_offset
+            self._ble_calibration_samples.append({
+                'main_x': data_list[6 + o] | ((data_list[7 + o] & 0x0F) << 8),
+                'main_y': (data_list[7 + o] >> 4) | (data_list[8 + o] << 4),
+                'c_x': data_list[9 + o] | ((data_list[10 + o] & 0x0F) << 8),
+                'c_y': (data_list[10 + o] >> 4) | (data_list[11 + o] << 4),
+            })
+            if len(self._ble_calibration_samples) >= 10:
+                n = len(self._ble_calibration_samples)
+                self.calibration['main_x_center'] = int(sum(s['main_x'] for s in self._ble_calibration_samples) / n)
+                self.calibration['main_y_center'] = int(sum(s['main_y'] for s in self._ble_calibration_samples) / n)
+                self.calibration['c_x_center'] = int(sum(s['c_x'] for s in self._ble_calibration_samples) / n)
+                self.calibration['c_y_center'] = int(sum(s['c_y'] for s in self._ble_calibration_samples) / n)
+                self.calibration['calibrated'] = True
+                print("  ✓ BLE calibration complete (from first 10 reports)")
+
+        self.current_state = parsed
+
+        if self.dsu_server and self.dsu_server.running:
+            try:
+                raw_state = {'raw_bytes': data_list, 'parsed': parsed}
+                self.dsu_server.update(raw_state)
+            except Exception:
+                pass
+
+        if self.log_file:
+            self.log_sample(data_list, parsed)
+
+        if self.use_gui and self.gui_window:
+            if hasattr(self.gui_window, 'root'):
+                self.gui_window.root.after(0, lambda p=parsed: self.gui_window.update_state(p))
+            # PyQt5 uses a timer that reads current_state in update_display(); no call needed
+
+    async def _run_wireless_async(self):
+        """Connect over BLE, discover notify/write characteristics, handshake, and receive input reports.
+        Nintendo BLE (SW2) may not expose standard 0x2A4d; we discover from the device.
+        """
+        try:
+            self._ble_loop = asyncio.get_event_loop()
+            while self.running:
+                try:
+                    print(f"Connecting to {self.address}... (put controller in pairing mode now)")
+                    async with BleakClient(self.address, timeout=10.0) as client:
+                        print("✓ Connected! Discovering characteristics...")
+                        notify_chars = []
+                        write_chars = []
+                        for svc in client.services:
+                            for char in svc.characteristics:
+                                props = getattr(char, "properties", []) or []
+                                if "notify" in props or "indicate" in props:
+                                    notify_chars.append(char)
+                                if "write" in props or "write-without-response" in props:
+                                    write_chars.append(char)
+                        if not notify_chars:
+                            raise RuntimeError("No notify/indicate characteristic found")
+                        if not write_chars:
+                            raise RuntimeError("No write characteristic found")
+                        print(f"  Subscribing to {len(notify_chars)} notify char(s), trying handshake on {len(write_chars)} write char(s)...")
+                        for char in notify_chars:
+                            await client.start_notify(char.uuid, self._notification_handler)
+                        handshake_done = False
+                        handshake_char = None
+                        for char in write_chars:
+                            try:
+                                await client.write_gatt_char(char.uuid, BLE_HANDSHAKE_READ_SPI)
+                                handshake_done = True
+                                handshake_char = char
+                                break
+                            except Exception:
+                                try:
+                                    await client.write_gatt_char(char.uuid, bytearray([0x01, 0x01]))
+                                    handshake_done = True
+                                    handshake_char = char
+                                    break
+                                except Exception:
+                                    pass
+                        if not handshake_done:
+                            print("  (Handshake write failed on all write chars; continuing for input reports.)")
+                        # Send default + LED report so controller stops pairing blink and shows assigned slot
+                        if handshake_char:
+                            for data in (bytearray(DEFAULT_REPORT_DATA), bytearray(SET_LED_DATA)):
+                                try:
+                                    await client.write_gatt_char(handshake_char.uuid, data)
+                                except Exception:
+                                    pass
+                            print("  ✓ Slot/LED report sent (controller may stop blinking)")
+                        while self.running:
+                            await asyncio.sleep(0.1)
+                        break
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    if not self.running:
+                        break
+                    print(f"  Not yet: {e}")
+                    print(f"  Retrying in {BLE_CONNECT_RETRY_SEC}s...")
+                    await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            if self.running:
+                print(f"\nBLE error: {e}")
+        finally:
+            self._ble_loop = None
+
+    def start(self):
+        """Start the wireless driver (BLE only, no USB/HID)."""
+        print("NSO GameCube Controller Driver (BLE)")
+        print("=" * 70)
+        print("Controller not in system Bluetooth list? Start this script first, then")
+        print("put the controller in pairing mode. We connect by address (no system pairing).")
+        print("If 'device was not found': the controller may use a random BLE address. Run")
+        print("  python main.py --ble-scan   (with controller in pairing mode) to discover its address.")
+
+        if not BLE_AVAILABLE:
+            print("✗ bleak not installed. Run: pip install bleak")
+            return False
+
+        if self.dsu_server and not self.dsu_server.start():
+            print("⚠️  DSU server failed to start", flush=True)
+            self.dsu_server = None
+
+        self.running = True
+
+        def run_ble():
+            asyncio.run(self._run_wireless_async())
+
+        ble_thread = threading.Thread(target=run_ble, daemon=True)
+        ble_thread.start()
+
+        if self.use_gui:
+            try:
+                print(f"Initializing GUI ({GUI_TYPE})...")
+                if GUI_TYPE == 'tkinter':
+                    self.gui_window = ControllerGUI(self)
+                elif GUI_TYPE == 'pyqt5':
+                    self.gui_window = ControllerGUIPyQt5(self)
+                else:
+                    raise ValueError(f"Unknown GUI type: {GUI_TYPE}")
+                print("GUI initialized, starting main loop...")
+                self.gui_window.run()
+            except Exception as e:
+                print(f"✗ GUI error: {e}")
+                import traceback
+                traceback.print_exc()
+                print("\nFalling back to terminal mode...")
+                self.use_gui = False
+                print("✓ Driver started successfully!")
+                print("\nDriver is running. Press Ctrl+C to stop.\n")
+                try:
+                    while self.running:
+                        time.sleep(0.1)
+                except KeyboardInterrupt:
+                    self.stop()
+        else:
+            print("✓ Driver started successfully!")
+            print("\nDriver is running. Press Ctrl+C to stop.\n")
+            try:
+                while self.running:
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                self.stop()
+
+        return True
+
+    def stop(self):
+        """Stop the wireless driver."""
+        self.running = False
+        if self.dsu_server:
+            self.dsu_server.stop()
+        if self.hid_device:
+            self.hid_device.close()
+        if self.usb_device:
+            try:
+                usb.util.release_interface(self.usb_device, INTERFACE_NUM)
+                usb.util.dispose_resources(self.usb_device)
+            except Exception:
                 pass
         print("\nDriver stopped")
 
@@ -1011,6 +1251,14 @@ def main():
     parser.add_argument('--log', type=str, help='Log file path (logs every second with all interpretations)')
     parser.add_argument('--dsu', action='store_true',
                        help='Start DSU server for Dolphin (UDP-based, works on all platforms including macOS!)')
+    parser.add_argument('--ble', action='store_true',
+                       help='Use BLE instead of USB/HID (for wireless controller not visible as HID device)')
+    parser.add_argument('--address', type=str, default='7B:5F:D6:6C:00:9B',
+                       help='BLE MAC address when using --ble (default: 7B:5F:D6:6C:00:9B)')
+    parser.add_argument('--ble-scan', action='store_true',
+                       help='Scan for BLE devices and list addresses (put controller in pairing mode first). Use the address shown with --ble --address <addr>')
+    parser.add_argument('--ble-scan-diff', action='store_true',
+                       help='Two scans in one run: first with controller ON (pairing mode), then OFF. Prints the address that disappeared (your controller).')
     args = parser.parse_args()
     
     # Set up log file
@@ -1061,9 +1309,117 @@ def main():
         print("Starting in terminal mode (use --gui for visual interface)...")
         if args.debug:
             print("Debug mode: Will show raw byte dumps")
-    
-    driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=args.dsu)
-    
+
+    if getattr(args, 'ble_scan_diff', False):
+        if not BLE_AVAILABLE or BleakScanner is None:
+            print("✗ --ble-scan-diff requires bleak. Run: pip install bleak")
+            return 1
+        print("BLE scan (diff): we will run two short scans.")
+        print("First scan: controller ON (pairing mode). Second scan: controller OFF.\n")
+        input("Put controller in pairing mode, then press Enter to start first scan... ")
+        print(f"Scanning for {BLE_SCAN_DIFF_DURATION_SEC} seconds...")
+        devices_on = asyncio.run(
+            BleakScanner.discover(timeout=BLE_SCAN_DIFF_DURATION_SEC)
+        )
+        addrs_on = {d.address for d in devices_on}
+        print(f"  First scan: {len(devices_on)} device(s).\n")
+        input("Turn controller OFF, then press Enter to start second scan... ")
+        print(f"Scanning for {BLE_SCAN_DIFF_DURATION_SEC} seconds...")
+        devices_off = asyncio.run(
+            BleakScanner.discover(timeout=BLE_SCAN_DIFF_DURATION_SEC)
+        )
+        addrs_off = {d.address for d in devices_off}
+        disappeared = addrs_on - addrs_off
+        if not disappeared:
+            print("  No device disappeared between scans. Make sure the controller was ON (pairing) in the first scan and OFF in the second.")
+            return 0
+        # Build name lookup from first scan
+        name_by_addr = {d.address: (d.name or "(no name)") for d in devices_on}
+        # BlueRetro identifies Nintendo BLE by name "DeviceName" - try that one first
+        def _sort_candidates(addr):
+            name = (name_by_addr.get(addr, "") or "").lower()
+            return (0 if name == "devicename" else 1, addr)
+        ordered = sorted(disappeared, key=_sort_candidates)
+        print(f"  Second scan: {len(devices_off)} device(s).")
+        print(f"\nDevice(s) that disappeared (candidates): {len(disappeared)}. 'DeviceName' tried first (Nintendo BLE).\n")
+        for addr in ordered:
+            print(f"  {addr}  {name_by_addr.get(addr, '(no name)')}")
+
+        async def _try_handshake(addr):
+            """Connect and try Nintendo BLE handshake on any writable characteristic; return True if one accepts."""
+            try:
+                async with BleakClient(addr, timeout=BLE_HANDSHAKE_TRY_TIMEOUT_SEC) as client:
+                    for svc in client.services:
+                        for char in svc.characteristics:
+                            if "write" in char.properties or "write-without-response" in char.properties:
+                                try:
+                                    await client.write_gatt_char(char.uuid, BLE_HANDSHAKE_READ_SPI)
+                                    return True
+                                except Exception:
+                                    pass
+                    return False
+            except Exception:
+                return False
+
+        print("\nTrying each candidate (only the real controller accepts the handshake). Timeout 1.5s each.")
+        input("Put controller in pairing mode again, then press Enter... ")
+        controller_addr = None
+        for addr in ordered:
+            print(f"  Trying {addr}...", end=" ", flush=True)
+            if asyncio.run(_try_handshake(addr)):
+                print("✓ controller")
+                controller_addr = addr
+                break
+            print("no")
+        if controller_addr:
+            print(f"\nController at: {controller_addr}")
+            print(f"Run: python main.py --ble --address {controller_addr}")
+        else:
+            print("\nNone of the candidates accepted the handshake. Put controller in pairing mode and run --ble-scan-diff again.")
+        return 0
+
+    if getattr(args, 'ble_scan', False):
+        if not BLE_AVAILABLE or BleakScanner is None:
+            print("✗ --ble-scan requires bleak. Run: pip install bleak")
+            return 1
+        async def _do_scan():
+            print("BLE scan: put your controller in pairing mode now.")
+            print(f"Scanning for {BLE_SCAN_DURATION_SEC} seconds...\n")
+            devices = await BleakScanner.discover(timeout=BLE_SCAN_DURATION_SEC)
+            if not devices:
+                print("No devices found. Put controller in pairing mode and try again.")
+                return
+            print(f"Found {len(devices)} device(s). Use one of these with --ble --address <ADDRESS>:\n")
+            print("(On macOS these show as UUIDs, not MAC addresses. They still work with --ble --address.)\n")
+            for d in sorted(devices, key=lambda x: (x.name or "")):
+                name = (d.name or "(no name)")
+                addr = d.address
+                rssi = getattr(d, 'rssi', None)
+                r = f"  RSSI: {rssi} dBm" if rssi is not None else ""
+                print(f"  {addr}  {name}  {r}")
+            print("\nTo find your controller: use --ble-scan-diff for two scans in one run.")
+            print("\nExample: python main.py --ble --address", devices[0].address)
+        asyncio.run(_do_scan())
+        return 0
+
+    if args.ble:
+        if not BLE_AVAILABLE:
+            print("✗ --ble requires bleak. Run: pip install bleak")
+            try:
+                import bleak
+            except Exception as e:
+                print(f"  (import failed: {e})")
+            return 1
+        # DSU enabled by default with BLE so Dolphin can use the controller without --dsu
+        driver = NSOWirelessDriver(
+            args.address,
+            use_gui=use_gui,
+            log_file=log_file,
+            use_dsu=args.dsu or args.ble,
+        )
+    else:
+        driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=args.dsu)
+
     try:
         driver.start()
     except Exception as e:
