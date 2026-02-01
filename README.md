@@ -1,8 +1,8 @@
 # NSO GameCube Controller Driver
 
-Driver for the Nintendo Switch Online GameCube Controller on macOS/Linux.
+Driver for the Nintendo Switch Online GameCube Controller on macOS/Linux. Use it over **USB** or **BLE** with Dolphin (DSU) or the built-in GUI.
 
-Demo within Dolphin (using the included DSU server, run with `--dsu`):
+Demo within Dolphin (DSU server is on by default):
 ![Kapture 2026-01-25 at 19 02 18](https://github.com/user-attachments/assets/95334808-5a85-41f0-8a47-1e66ec156a3f)
 
 
@@ -10,100 +10,125 @@ Demo with custom GUI (using the included GUI, run with `--gui`):
 ![Kapture 2026-01-25 at 12 02 22](https://github.com/user-attachments/assets/95aead76-7f64-4b5e-b547-c8ae1f0fb74d)
 
 
-## Quick Start
+---
 
-1. **Install dependencies:**
+## Part 1: Script & controller setup
+
+Choose **USB** or **BLE** (for using over Bluetooth) depending on how you connect the controller.
+
+### Prerequisites
+
+- **Python 3.7+** and **pip**
+- **macOS:** For BLE, allow **Bluetooth** for Terminal (or your Python app) in **System Settings → Privacy & Security → Bluetooth**
+
+---
+
+### Option A: USB
+
+1. **Plug in** the controller with a USB cable.
+2. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
-
-2. **Run the driver:**
+3. **Run the driver** (DSU for Dolphin is on by default):
    ```bash
    python3 main.py
    ```
+   Or explicitly: `python3 main.py --usb`. With GUI: `python3 main.py --gui`
+4. You should see `✓ USB device found` and `✓ Driver started successfully!` Keep this terminal open while you use the controller.
 
-3. **With GUI (optional):**
+*(TODO Add screenshot: Terminal showing successful USB startup if desired.)*
+
+---
+
+### Option B: BLE (wireless)
+
+1. **Install dependencies** (includes `bleak` for BLE):
    ```bash
-   python3 main.py --gui
+   pip install -r requirements.txt
+   ```
+2. **Put the controller in pairing mode** (hold the **pair** button until the LEDs blink).
+3. **Run the driver:**
+   ```bash
+   python3 main.py --ble
+   ```
+   The script will **scan** for the controller and connect automatically. Keep the pair button held (or put it in pairing mode) when you start the script.
+4. You should see `Scanning for controller...`, then `Found controller at ...` and `✓ Connected!` Keep this terminal open.
+
+**Optional:** To use a specific controller address (e.g. after running `python3 main.py --ble-scan`):
+   ```bash
+   python3 main.py --ble --address <YOUR_ADDRESS>
    ```
 
-4. **Log data (optional):**
-   ```bash
-   python3 main.py --log stick_data.jsonl
-   ```
+*(TODO Add screenshot: Terminal showing BLE scan and connect if desired.)*
 
-## Usage
+---
 
-- **Terminal mode**: Shows real-time stick positions and button presses
-- **GUI mode**: Visual interface showing stick positions, buttons, and triggers
-- **Logging**: Saves controller data to a JSON Lines file for analysis
+## Part 2: Dolphin configuration
 
-Press `Ctrl+C` to stop the driver.
+Use these steps to use the controller in Dolphin via the DSU client.
 
-## Technical Details
+1. **Start the driver** (DSU is on by default):
+   - USB: `python3 main.py` (or `python3 main.py --usb`)
+   - BLE: `python3 main.py --ble`
+2. **Open Dolphin** → **Controllers** (or **Options** → **Controller Settings**).
 
-### Input Decoding
+   *(TODO Add screenshot: Dolphin main menu or Controllers entry point.)*
 
-The controller uses the Switch HID protocol with **12-bit nibble-packed stick values**.
+3. **Configure the port** you want (e.g. Port 1). Set **Device** to **DSU Client**.
 
-#### Stick Data Format
+   *(TODO Add screenshot: Device dropdown with "DSU Client" selected.)*
 
-Each stick axis is 12 bits (0-4095), packed into 3 bytes per 2 axes:
+4. **Click Configure** for that port. Map the controller inputs to Dolphin’s buttons:
+   - **A, B, X, Y** → face buttons (e.g. Cross, Circle, Square, Triangle)
+   - **Main Stick** → left stick
+   - **C-Stick** → right stick
+   - **L, R, Z, ZL** → shoulder buttons / triggers
+   - **Start** → Start / Options
+   - **D-pad** → D-pad
 
-**Main Stick (bytes 6-8):**
-- **X axis**: `byte6` (low 8 bits) | `(byte7 & 0x0F) << 8` (high 4 bits)
-- **Y axis**: `(byte7 >> 4)` (low 4 bits) | `byte8 << 4` (high 8 bits)
+   *(TODO Add screenshot: Dolphin button mapping window with DSU client.)*
 
-**C-Stick (bytes 9-11):**
-- **X axis**: `byte9` (low 8 bits) | `(byte10 & 0x0F) << 8` (high 4 bits)
-- **Y axis**: `(byte10 >> 4)` (low 4 bits) | `byte11 << 4` (high 8 bits)
+5. **Port:** The script’s DSU server uses **UDP port 26760**. If Dolphin asks for a port or server address, use `127.0.0.1` (or localhost) and port **26760**.
 
-#### Calibration
+   *(TODO Add screenshot: Dolphin DSU/network settings if your build shows port or host.)*
 
-At startup, the driver assumes the controller is in a neutral position and samples 10 readings to determine the center point for each axis (typically around 2048 = 2^11). All subsequent readings are offset by subtracting this center value, resulting in signed integers ranging from approximately -2048 to +2047.
+6. Click **OK** and start a game. The NSO controller should work as the configured DSU client.
 
-#### Button Mapping
+---
 
-Buttons are bit-packed in bytes 3-5:
-- **Byte 3**: B, A, Y, X, R, Z, Start
-- **Byte 4**: D-pad directions, L, ZL
-- **Byte 5**: Home, Capture
+## Quick reference
 
-#### Triggers
+| Goal              | Command                          |
+|-------------------|-----------------------------------|
+| USB + Dolphin     | `python3 main.py` or `python3 main.py --usb` |
+| USB + GUI         | `python3 main.py --gui`          |
+| BLE (auto pair)   | `python3 main.py --ble`           |
+| BLE + specific MAC| `python3 main.py --ble --address ADDR` |
+| Find BLE address  | `python3 main.py --ble-scan`      |
+| Disable DSU       | `python3 main.py --no-dsu` (or `--ble --no-dsu`) |
+| Stop              | `Ctrl+C` in the terminal          |
 
-Analog triggers are 8-bit values (0-255) at bytes 13-14.
+DSU (Dolphin) is **on by default** for both USB and BLE. Use `--no-dsu` to disable it. Press **Ctrl+C** in the terminal to stop the driver.
 
-### Protocol Initialization
+---
 
-The driver requires USB initialization before HID reading:
-1. Send default report (16 bytes) to USB endpoint
-2. Send LED report (16 bytes) to USB endpoint
-3. Open HID device for continuous input reading
+## Technical details
 
-## Requirements
+### Input decoding
+
+The controller uses the Switch HID protocol with **12-bit nibble-packed stick values**. Buttons are bit-packed in bytes 2–4 (BLE 63-byte) or 3–5 (USB); sticks in bytes 5–7 (main) and 8–10 (C-stick) for BLE 63-byte, or 6–8 and 9–11 for USB. The driver calibrates stick center from the first reports (BLE: median of 50 samples after a short delay).
+
+### Requirements
 
 - Python 3.7+
-- `hidapi` (for HID communication)
-- `pyusb` (for USB initialization)
-- Optional: `PyQt5` or `tkinter` for GUI mode
+- `hidapi` (HID), `pyusb` (USB init)
+- **BLE:** `bleak`
+- **GUI:** PyQt5 or tkinter
 
-## Using with Dolphin Emulator
+### DSU mapping (Cemuhook/DSU protocol, UDP 26760)
 
-Start the driver with DSU server:
-```bash
-python3 main.py --dsu
-```
-
-Configure Dolphin: Controllers → Configure → Set Device to "DSU Client" → Map buttons.
-
-The DSU server implements the Cemuhook/DSU protocol on UDP port 26760. Input mapping:
-- Main Stick → Left analog stick
-- C-Stick → Right analog stick
+- Main Stick → left analog; C-Stick → right analog
 - A, B, X, Y → Cross, Circle, Square, Triangle
-- L, R → L1, R1
-- Z → R3
-- ZL → L2Btn
-- Start → Options
-- Home → PS Button
-- Triggers → L2, R2 analog triggers
-
+- L, R → L1, R1; Z → R3; ZL → L2Btn
+- Start → Options; Home → PS Button; triggers → L2/R2 analog

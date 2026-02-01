@@ -1748,10 +1748,12 @@ def main():
     parser.add_argument('--gui', action='store_true', help='Use GUI mode (requires tkinter or PyQt5)')
     parser.add_argument('--debug', action='store_true', help='Show detailed raw byte output')
     parser.add_argument('--log', type=str, help='Log file path (logs every second with all interpretations)')
-    parser.add_argument('--dsu', action='store_true',
-                       help='Start DSU server for Dolphin (UDP-based, works on all platforms including macOS!)')
+    parser.add_argument('--no-dsu', action='store_true',
+                       help='Disable DSU server (default: DSU on for Dolphin)')
+    parser.add_argument('--usb', action='store_true',
+                       help='Use USB (default when neither --usb nor --ble)')
     parser.add_argument('--ble', action='store_true',
-                       help='Use BLE instead of USB/HID (for wireless controller not visible as HID device)')
+                       help='Use BLE instead of USB (wireless; hold pair button to connect)')
     parser.add_argument('--address', type=str, default=None,
                        help='BLE address when using --ble (optional: omit to auto-discover; hold pair button when starting)')
     parser.add_argument('--ble-report-offset', type=int, default=0, metavar='N',
@@ -1931,10 +1933,10 @@ def main():
             ble_discover=getattr(args, 'ble_discover', False),
             use_gui=use_gui if not getattr(args, 'ble_discover', False) else False,
             log_file=log_file,
-            use_dsu=(args.dsu or args.ble) and not getattr(args, 'ble_discover', False),
+            use_dsu=not getattr(args, 'no_dsu', False) and not getattr(args, 'ble_discover', False),
         )
     else:
-        driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=args.dsu)
+        driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=not getattr(args, 'no_dsu', False))
 
     try:
         driver.start()
