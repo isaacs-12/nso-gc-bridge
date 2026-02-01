@@ -1,6 +1,9 @@
 hidapi>=0.14.0
 pyusb>=1.2.0
 
+# BLE support (for --ble flag, e.g. wireless NSO controller not visible as HID):
+bleak>=0.21.0
+
 # GUI option (install one of these for --gui flag):
 # Option 1: For tkinter GUI (part of Python stdlib, but may need installation on macOS)
 #   On macOS: brew install python-tk
