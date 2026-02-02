@@ -12,6 +12,8 @@ import time
 import sys
 import threading
 import asyncio
+import queue
+from collections import deque
 
 # Optional BLE support (for wireless controller not visible as HID)
 try:
@@ -32,6 +34,9 @@ BLE_SCAN_DIFF_DURATION_SEC = 8
 BLE_HANDSHAKE_TRY_TIMEOUT_SEC = 1.5
 # Scan duration when --ble is used without --address (auto-discover). Hold pair button during this.
 BLE_SCAN_AUTO_SEC = 10
+# BLE connection interval: units of 1.25ms. 6=7.5ms (min), 12=15ms. Request before connect on Linux to get USB-like latency.
+BLE_CONN_MIN_INTERVAL_UNITS = 6   # 7.5ms
+BLE_CONN_MAX_INTERVAL_UNITS = 12  # 15ms
 
 # Import DSU server support
 try:
@@ -105,6 +110,9 @@ SET_LED_DATA = [
     0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 ]
 
+# Subcommand 0x03: Set Input Mode — 0x30 = standard full reports (max report rate for dash dancing / short hops)
+SET_INPUT_MODE = bytearray([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30])
+
 
 class NSODriver:
     """NSO GameCube Controller Driver."""
@@ -134,7 +142,30 @@ class NSODriver:
             'c_y_center': None,
             'calibrated': False
         }
-        
+        self._init_latency_monitor()
+
+    def _init_latency_monitor(self):
+        """Track inter-arrival time of input reports for latency comparison (USB vs BLE)."""
+        self._last_packet_time = None
+        self._iat_history = deque(maxlen=100)  # last 100 packets
+
+    def _log_latency(self):
+        """Log IAT stats every 100 packets. Avg 8–10ms = excellent; >20ms = dash dancing suffers."""
+        current_time = time.perf_counter()
+        if self._last_packet_time is not None:
+            delta = (current_time - self._last_packet_time) * 1000
+            self._iat_history.append(delta)
+            if len(self._iat_history) == 100:
+                avg = sum(self._iat_history) / 100
+                max_val = max(self._iat_history)
+                min_val = min(self._iat_history)
+                jitter = (sum((x - avg) ** 2 for x in self._iat_history) / 100) ** 0.5
+                msg = f"[Latency] Avg: {avg:.2f}ms | Jitter: {jitter:.2f}ms | Range: [{min_val:.1f}-{max_val:.1f}]"
+                self._iat_history.clear()
+                if self.log_file:
+                    threading.Thread(target=lambda m=msg: print(m), daemon=True).start()
+        self._last_packet_time = current_time
+
     def find_usb_device(self):
         """Find USB device and get endpoints."""
         self.usb_device = usb.core.find(idVendor=VID, idProduct=PID)
@@ -466,6 +497,7 @@ class NSODriver:
             try:
                 data = self.hid_device.read(64)
                 if data:
+                    self._log_latency()
                     data_list = list(data)
                     
                     # Process all data for logging (even if unchanged)
@@ -536,7 +568,9 @@ class NSODriver:
         
         # Step 3: Start reading
         self.running = True
-        
+        if self.log_file:
+            print("Latency stats ([Latency] Avg/Jitter/Range) printed here every ~100 reports.")
+
         if self.use_gui:
             # Start GUI in main thread
             try:
@@ -616,6 +650,26 @@ class NSOWirelessDriver(NSODriver):
         self._discover_lock = threading.Lock()
         self._discover_samples = []  # list of (phase, data_list); max 300
         self._discover_phase = None
+        self._log_queue = queue.Queue()
+        self._log_worker_started = False
+        self._init_latency_monitor()  # uses base class implementation
+
+    def _try_set_ble_connection_interval_linux(self):
+        """On Linux, request shorter BLE connection interval (7.5–15ms) before connect so reports arrive ~4x faster (USB-like).
+        Requires debugfs and often root. No-op on other platforms or on failure."""
+        if sys.platform != 'linux':
+            return
+        base = '/sys/kernel/debug/bluetooth/hci0'
+        for name, val in (('conn_min_interval', BLE_CONN_MIN_INTERVAL_UNITS), ('conn_max_interval', BLE_CONN_MAX_INTERVAL_UNITS)):
+            path = f'{base}/{name}'
+            try:
+                with open(path, 'w') as f:
+                    f.write(str(val))
+                if not getattr(self, '_ble_interval_logged', False):
+                    print("  Requested shorter BLE connection interval (Linux debugfs).")
+                    self._ble_interval_logged = True
+            except (OSError, IOError):
+                pass
 
     def parse_ble_input(self, data):
         """Parse BLE input report. Handles Nintendo formats: 0x3F (simple), reordered (sticks then buttons), standard 0x30.
@@ -881,6 +935,7 @@ class NSOWirelessDriver(NSODriver):
 
     def _notification_handler(self, sender, data):
         """Handle BLE input report notifications. Native NSO (sliding-window) first; 63-byte = BlueRetro layout."""
+        self._log_latency()
         data_list = list(data)
         if getattr(self, 'ble_discover', False) and getattr(self, '_discover_phase', None):
             with self._discover_lock:
@@ -908,7 +963,8 @@ class NSOWirelessDriver(NSODriver):
         if not parsed:
             return
 
-        # Deferred calibration from parsed stick raw values (median over 50 samples, skip first few reports)
+        # Deferred calibration from parsed stick raw values (median over 50 samples, skip first few reports).
+        # Run median computation in a background thread so the notification callback returns immediately.
         if not self.calibration['calibrated'] and 'sticks' in parsed and 'main_x_raw' in parsed['sticks']:
             if getattr(self, '_ble_calibration_skip', 0) > 0:
                 self._ble_calibration_skip -= 1
@@ -919,15 +975,21 @@ class NSOWirelessDriver(NSODriver):
                     'c_x': s['c_x_raw'], 'c_y': s['c_y_raw'],
                 })
                 if len(self._ble_calibration_samples) >= 50:
-                    def median(vals):
-                        srt = sorted(vals)
-                        return srt[len(srt) // 2]
-                    self.calibration['main_x_center'] = median(s['main_x'] for s in self._ble_calibration_samples)
-                    self.calibration['main_y_center'] = median(s['main_y'] for s in self._ble_calibration_samples)
-                    self.calibration['c_x_center'] = median(s['c_x'] for s in self._ble_calibration_samples)
-                    self.calibration['c_y_center'] = median(s['c_y'] for s in self._ble_calibration_samples)
-                    self.calibration['calibrated'] = True
-                    print("  ✓ BLE stick calibration complete (median of 50 samples)")
+                    samples = list(self._ble_calibration_samples)
+                    self._ble_calibration_samples.clear()
+
+                    def _apply_calibration():
+                        def median(vals):
+                            srt = sorted(vals)
+                            return srt[len(srt) // 2]
+                        self.calibration['main_x_center'] = median(s['main_x'] for s in samples)
+                        self.calibration['main_y_center'] = median(s['main_y'] for s in samples)
+                        self.calibration['c_x_center'] = median(s['c_x'] for s in samples)
+                        self.calibration['c_y_center'] = median(s['c_y'] for s in samples)
+                        self.calibration['calibrated'] = True
+                        print("  ✓ BLE stick calibration complete (median of 50 samples)")
+
+                    threading.Thread(target=_apply_calibration, daemon=True).start()
 
         self.current_state = parsed
 
@@ -939,7 +1001,10 @@ class NSOWirelessDriver(NSODriver):
                 pass
 
         if self.log_file:
-            self.log_sample(data_list, parsed)
+            try:
+                self._log_queue.put_nowait((list(data_list), parsed))
+            except queue.Full:
+                pass
 
         if self.use_gui and self.gui_window:
             if hasattr(self.gui_window, 'root'):
@@ -1112,67 +1177,160 @@ class NSOWirelessDriver(NSODriver):
     async def _run_wireless_async(self):
         """Connect over BLE, discover notify/write characteristics, handshake, and receive input reports.
         Nintendo BLE (SW2) may not expose standard 0x2A4d; we discover from the device.
+        When scanning (no address), we connect once to the first device that accepts handshake and stay
+        connected so the controller is not bumped out of pairing mode by a connect-then-disconnect.
         """
         try:
             self._ble_loop = asyncio.get_event_loop()
             while self.running:
                 try:
+                    self._try_set_ble_connection_interval_linux()
                     if not self.address:
+                        # Scan then connect once to first device that accepts handshake (no disconnect in between).
                         print("Scanning for controller... Hold the pair button.")
-                        self.address = await self._discover_controller_address()
-                        if not self.address:
+                        if BleakScanner is None:
+                            await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
+                            continue
+                        devices = await BleakScanner.discover(timeout=BLE_SCAN_AUTO_SEC)
+                        if not devices:
                             print("  No controller found. Hold the pair button and we'll retry.")
                             await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
                             continue
-                        print(f"  Found controller at {self.address}")
-                    print(f"Connecting to {self.address}...")
-                    async with BleakClient(self.address, timeout=10.0) as client:
-                        print("✓ Connected! Discovering characteristics...")
-                        notify_chars = []
-                        write_chars = []
-                        for svc in client.services:
-                            for char in svc.characteristics:
-                                props = getattr(char, "properties", []) or []
-                                if "notify" in props or "indicate" in props:
-                                    notify_chars.append(char)
-                                if "write" in props or "write-without-response" in props:
-                                    write_chars.append(char)
-                        if not notify_chars:
-                            raise RuntimeError("No notify/indicate characteristic found")
-                        if not write_chars:
-                            raise RuntimeError("No write characteristic found")
-                        print(f"  Subscribing to {len(notify_chars)} notify char(s), trying handshake on {len(write_chars)} write char(s)...")
-                        for char in notify_chars:
-                            await client.start_notify(char.uuid, self._notification_handler)
-                        handshake_done = False
+                        name_by_addr = {d.address: (d.name or "(no name)").strip() for d in devices}
+                        def _sort_key(addr):
+                            name = (name_by_addr.get(addr, "") or "").lower()
+                            return (0 if name == "devicename" else 1, 0 if "nintendo" in name else 1, addr)
+                        ordered = sorted(devices, key=lambda d: _sort_key(d.address))
+                        client = None
                         handshake_char = None
-                        for char in write_chars:
+                        for d in ordered:
+                            c = BleakClient(d.address, timeout=10.0)
                             try:
-                                await client.write_gatt_char(char.uuid, BLE_HANDSHAKE_READ_SPI)
-                                handshake_done = True
-                                handshake_char = char
+                                await c.connect()
+                                for svc in c.services:
+                                    for char in svc.characteristics:
+                                        props = getattr(char, "properties", []) or []
+                                        if "write" not in props and "write-without-response" not in props:
+                                            continue
+                                        try:
+                                            await c.write_gatt_char(char.uuid, BLE_HANDSHAKE_READ_SPI)
+                                            handshake_char = char
+                                            break
+                                        except Exception:
+                                            try:
+                                                await c.write_gatt_char(char.uuid, bytearray([0x01, 0x01]))
+                                                handshake_char = char
+                                                break
+                                            except Exception:
+                                                pass
+                                    if handshake_char is not None:
+                                        break
+                                if handshake_char is None:
+                                    await c.disconnect()
+                                    continue
+                                client = c
+                                self.address = d.address
+                                print(f"  Found controller at {self.address}")
                                 break
                             except Exception:
                                 try:
-                                    await client.write_gatt_char(char.uuid, bytearray([0x01, 0x01]))
+                                    await c.disconnect()
+                                except Exception:
+                                    pass
+                                continue
+                        if client is None:
+                            print("  No controller found. Hold the pair button and we'll retry.")
+                            await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
+                            continue
+                        # Stay connected: subscribe, send LED/slot, then main loop (no second connect).
+                        try:
+                            print("✓ Connected! Discovering characteristics...")
+                            notify_chars = []
+                            for svc in client.services:
+                                for char in svc.characteristics:
+                                    props = getattr(char, "properties", []) or []
+                                    if "notify" in props or "indicate" in props:
+                                        notify_chars.append(char)
+                            if not notify_chars:
+                                raise RuntimeError("No notify/indicate characteristic found")
+                            print(f"  Subscribing to {len(notify_chars)} notify char(s)...")
+                            if self.log_file:
+                                print("  Latency stats ([Latency] Avg/Jitter/Range) printed here every ~100 reports.")
+                            for char in notify_chars:
+                                await client.start_notify(char.uuid, self._notification_handler)
+                            if handshake_char:
+                                for data in (bytearray(DEFAULT_REPORT_DATA), bytearray(SET_LED_DATA)):
+                                    try:
+                                        await client.write_gatt_char(handshake_char.uuid, data)
+                                    except Exception:
+                                        pass
+                                try:
+                                    await client.write_gatt_char(handshake_char.uuid, SET_INPUT_MODE)
+                                except Exception:
+                                    pass
+                                print("  ✓ Slot/LED report sent (controller may stop blinking)")
+                            while self.running:
+                                await asyncio.sleep(0.1)
+                        finally:
+                            try:
+                                await client.disconnect()
+                            except Exception:
+                                pass
+                        break
+                    else:
+                        # Address already known (e.g. --address): connect as before.
+                        print(f"Connecting to {self.address}...")
+                        async with BleakClient(self.address, timeout=10.0) as client:
+                            print("✓ Connected! Discovering characteristics...")
+                            notify_chars = []
+                            write_chars = []
+                            for svc in client.services:
+                                for char in svc.characteristics:
+                                    props = getattr(char, "properties", []) or []
+                                    if "notify" in props or "indicate" in props:
+                                        notify_chars.append(char)
+                                    if "write" in props or "write-without-response" in props:
+                                        write_chars.append(char)
+                            if not notify_chars:
+                                raise RuntimeError("No notify/indicate characteristic found")
+                            if not write_chars:
+                                raise RuntimeError("No write characteristic found")
+                            print(f"  Subscribing to {len(notify_chars)} notify char(s), trying handshake on {len(write_chars)} write char(s)...")
+                            if self.log_file:
+                                print("  Latency stats ([Latency] Avg/Jitter/Range) printed here every ~100 reports.")
+                            for char in notify_chars:
+                                await client.start_notify(char.uuid, self._notification_handler)
+                            handshake_done = False
+                            handshake_char = None
+                            for char in write_chars:
+                                try:
+                                    await client.write_gatt_char(char.uuid, BLE_HANDSHAKE_READ_SPI)
                                     handshake_done = True
                                     handshake_char = char
                                     break
                                 except Exception:
-                                    pass
-                        if not handshake_done:
-                            print("  (Handshake write failed on all write chars; continuing for input reports.)")
-                        # Send default + LED report so controller stops pairing blink (slot LED may not stay fixed on some controllers)
-                        if handshake_char:
-                            for data in (bytearray(DEFAULT_REPORT_DATA), bytearray(SET_LED_DATA)):
+                                    try:
+                                        await client.write_gatt_char(char.uuid, bytearray([0x01, 0x01]))
+                                        handshake_done = True
+                                        handshake_char = char
+                                        break
+                                    except Exception:
+                                        pass
+                            if not handshake_done:
+                                print("  (Handshake write failed on all write chars; continuing for input reports.)")
+                            if handshake_char:
+                                for data in (bytearray(DEFAULT_REPORT_DATA), bytearray(SET_LED_DATA)):
+                                    try:
+                                        await client.write_gatt_char(handshake_char.uuid, data)
+                                    except Exception:
+                                        pass
                                 try:
-                                    await client.write_gatt_char(handshake_char.uuid, data)
+                                    await client.write_gatt_char(handshake_char.uuid, SET_INPUT_MODE)
                                 except Exception:
                                     pass
-                            print("  ✓ Slot/LED report sent (controller may stop blinking)")
-                        # Optional: if inputs stop after ~5s, send Subcommand 0x03 (Set Input Mode) periodically as keep-alive
-                        while self.running:
-                            await asyncio.sleep(0.1)
+                                print("  ✓ Slot/LED report sent (controller may stop blinking)")
+                            while self.running:
+                                await asyncio.sleep(0.1)
                         break
                 except asyncio.CancelledError:
                     break
@@ -1209,6 +1367,21 @@ class NSOWirelessDriver(NSODriver):
             self.dsu_server = None
 
         self.running = True
+
+        def _log_worker():
+            while self.running:
+                try:
+                    data_list, parsed = self._log_queue.get(timeout=0.25)
+                    if self.log_file:
+                        self.log_sample(data_list, parsed)
+                except queue.Empty:
+                    continue
+                except Exception:
+                    pass
+
+        if not self._log_worker_started:
+            self._log_worker_started = True
+            threading.Thread(target=_log_worker, daemon=True).start()
 
         def run_ble():
             asyncio.run(self._run_wireless_async())

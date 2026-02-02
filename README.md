@@ -163,6 +163,7 @@ Use these steps to use the controller in Dolphin via the DSU client.
 | BLE (auto pair)   | `python3 main.py --ble`           |
 | BLE + specific MAC| `python3 main.py --ble --address ADDR` |
 | Find BLE address  | `python3 main.py --ble-scan`      |
+| Log + latency stats | `python3 main.py --log path/to/file.jsonl` (USB or BLE) |
 | Disable DSU       | `python3 main.py --no-dsu` (or `--ble --no-dsu`) |
 | Stop              | `Ctrl+C` in the terminal          |
 
@@ -182,6 +183,25 @@ The controller uses the Switch HID protocol with **12-bit nibble-packed stick va
 - `hidapi` (HID), `pyusb` (USB init)
 - **BLE:** `bleak`
 - **GUI:** PyQt5 or tkinter
+
+### Latency (USB vs BLE)
+
+The driver can measure **inter-arrival time (IAT)** between input reports and print stats every ~100 reports: `[Latency] Avg: Xms | Jitter: Xms | Range: [min–max]`. This helps you compare USB vs BLE and understand input lag (e.g. for dash dancing or short hops in Melee). **Latency stats are off by default.** To see them (and log input data to a file), run with `--log <path>`, e.g. `python3 main.py --ble --log latency.jsonl` or `python3 main.py --usb --log latency.jsonl`.
+
+| Connection | Typical avg | Why |
+|------------|-------------|-----|
+| **USB**    | ~4 ms       | Host polls at 250 Hz; controller sends as fast as we read. |
+| **BLE**    | ~30 ms      | Limited by BLE **connection interval** (~33 Hz). Controller/OS decide the interval; our code cannot make BLE send faster than the stack allows. |
+
+**Rough guide (avg IAT):** 8–10 ms = excellent; 12–16 ms = okay (occasional missed flicks); >20 ms = poor for tight timing (it get's really hard to perform L-cancels, short hops, wavedash, anything that needs high latency).
+
+**What we do in code:**
+
+- **USB:** Poll HID in a tight loop; no extra delay.
+- **BLE:** We request standard full reports at max rate (Set Input Mode subcommand), keep the notification callback lightweight (calibration, file logging, and latency print run off the hot path), and print latency stats so you can confirm numbers.
+- **Linux only:** Before connecting over BLE, we try to request a **shorter connection interval** (7.5–15 ms) via `/sys/kernel/debug/bluetooth/hci0/conn_min_interval` (and `conn_max_interval`). This can improve BLE toward ~7–15 ms if the controller and stack accept it. It requires **debugfs** and often **root** (e.g. `sudo python3 main.py --ble`). On macOS and Windows there is no such knob; BLE stays at the stack default (~30 ms).
+
+**TLDR:** For lowest latency use **USB** (~4 ms). For wireless, BLE ~30 ms is normal; on Linux you can try `sudo python3 main.py --ble` to request a shorter interval and see if latency drops. 33HZ, for what it's worth, is almost unnoticeable in games like Mario Kart, and only shows when tight frame perfet windows are needed.
 
 ### DSU mapping (Cemuhook/DSU protocol, UDP 26760)
 
