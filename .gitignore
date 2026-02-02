@@ -36,3 +36,6 @@ ENV/
 # macOS
 .DS_Store
 
+# Release artifacts (built by make release)
+release/
+

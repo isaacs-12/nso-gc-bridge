@@ -42,37 +42,17 @@ def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, log_path):
         cmd.append("--ble")
         if ble_address and ble_address.strip():
             cmd.extend(["--address", ble_address.strip()])
+        if use_debug:
+            cmd.append("--ble-debug")  # Debug only works with BLE (raw byte dumps)
     else:
         cmd.append("--usb")
     if not use_dsu:
         cmd.append("--no-dsu")
     if use_gui:
         cmd.append("--gui")
-    if use_debug:
-        cmd.append("--debug")
     if log_path and log_path.strip():
         cmd.extend(["--log", log_path.strip()])
     return cmd
-
-
-def run_ble_scan(log_queue, log_text):
-    """Run BLE scan and stream output to log view."""
-    cmd = [sys.executable, "main.py", "--ble-scan"]
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            cwd=SCRIPT_DIR,
-        )
-        for line in proc.stdout:
-            log_queue.put(("append", line))
-        proc.wait()
-        log_queue.put(("append", f"\n[Scan finished, exit code {proc.returncode}]\n"))
-    except Exception as e:
-        log_queue.put(("append", f"\n[Error: {e}]\n"))
 
 
 class LauncherApp:
@@ -118,7 +98,8 @@ class LauncherApp:
         ttk.Checkbutton(opt_frame, text="Show controller GUI", variable=self.gui_var).pack(anchor=tk.W)
 
         self.debug_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_frame, text="Debug (raw byte output)", variable=self.debug_var).pack(anchor=tk.W)
+        self.debug_cb = ttk.Checkbutton(opt_frame, text="Debug (BLE only: raw byte dumps)", variable=self.debug_var)
+        self.debug_cb.pack(anchor=tk.W)
 
         log_opt = ttk.Frame(opt_frame)
         log_opt.pack(fill=tk.X, pady=(2, 0))
@@ -138,8 +119,6 @@ class LauncherApp:
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
 
-        ttk.Button(btn_frame, text="BLE Scan", command=self._on_ble_scan).pack(side=tk.LEFT, padx=(15, 0))
-
         # --- Log view ---
         log_frame = ttk.LabelFrame(main, text="Log", padding=5)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
@@ -148,6 +127,17 @@ class LauncherApp:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._update_debug_visibility()
+        self.conn_var.trace_add("write", lambda *a: self._update_debug_visibility())
+
+    def _update_debug_visibility(self):
+        """Show debug option only for BLE (USB doesn't support it)."""
+        use_ble = self.conn_var.get() == "ble"
+        if use_ble:
+            self.debug_cb.config(state=tk.NORMAL)
+        else:
+            self.debug_var.set(False)
+            self.debug_cb.config(state=tk.DISABLED)
 
     def _log(self, msg):
         self.log_text.insert(tk.END, msg)
@@ -207,14 +197,6 @@ class LauncherApp:
         if self.process and self.process.poll() is None:
             self.process.terminate()
             self._log("\n[Stopping...]\n")
-
-    def _on_ble_scan(self):
-        self._log("\n--- BLE Scan (put controller in pairing mode) ---\n")
-        threading.Thread(
-            target=run_ble_scan,
-            args=(self.log_queue, self.log_text),
-            daemon=True,
-        ).start()
 
     def _on_close(self):
         if self.process and self.process.poll() is None:

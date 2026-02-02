@@ -116,4 +116,13 @@ make build      # Build dist/NSO GC Bridge.app
 make open       # Open the app
 ```
 
-The launcher provides checkboxes for USB/BLE, DSU, GUI, debug, and log options, plus a log view. Use **Start Driver** to run, **Stop** to quit, and **BLE Scan** to find your controller's address.
+The launcher provides checkboxes for USB/BLE, DSU, GUI, debug (BLE only), and log options, plus a log view. Use **Start Driver** to run, **Stop** to quit. To find your BLE address, run `python3 main.py --ble-scan` in a terminal (put controller in pairing mode first).
+
+### Releasing
+
+```bash
+make release                    # Create release/nso-gc-bridge-1.0.0.zip
+make release-publish VERSION=1.0.0   # Create GitHub release + upload (requires gh)
+```
+
+Install the GitHub CLI first: `brew install gh` then `gh auth login`. The zip includes `run.command` for double-click launch.
