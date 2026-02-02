@@ -14,16 +14,25 @@ Demo with custom GUI (run with `--gui`):
 
 ### Download
 
-Download the latest release from the [Releases](https://github.com/isaacs-12/nso-gc-bridge/releases) page.
+Download the latest release from the [Releases](https://github.com/isaacs-12/nso-gc-bridge/releases) page. Get `nso-gc-bridge-X.X.X.zip`, unzip it, and you'll see the executable Application.
 
-- **macOS:** Double-click `run.command` to start the launcher (a Terminal window will open). If you don't have a release yet, clone the repo and double-click `run.command` in the project folder.
-- **Linux:** Run from the project folder (see Developing).
+**One-time setup** (Python 3.7+ required):
+
+```bash
+cd nso-gc-bridge-X.X.X
+python3 -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+**To run:** Double-click `NSO GC Bridge` (macOS) or run `python3 launcher.py`. You may need to go into System Settings to whitelist this app. This opens the **launcher** — a GUI with checkboxes for USB/BLE, DSU, controller GUI, and log options, plus a log view. Use **Start Driver** to run, **Stop** to quit.
 
 ### Quick start
 
-1. **Start the driver** — Double-click `run.command` (or `NSO GC Bridge.app` on macOS), or run `python3 launcher.py` from the project folder. The launcher opens with checkboxes for USB/BLE, DSU, GUI, and other options.
+1. **Start the launcher** — Double-click `run.command`. A window opens with connection and option checkboxes.
 2. **Connect the controller** — USB: plug in the cable. BLE: put the controller in pairing mode (hold the pair button until LEDs blink), then select BLE in the launcher and click **Start Driver**.
 3. **Configure Dolphin** — Open Dolphin → Controllers → set the port to **DSU Client** → Configure and map buttons. Use `127.0.0.1` and port **26760** if prompted.
+4. **Verify connection** — With the driver running and Dolphin open, the launcher log will show "✓ Dolphin connected" when Dolphin has successfully linked to the DSU server.
 
 ### Dolphin button mapping
 
