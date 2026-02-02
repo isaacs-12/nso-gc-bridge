@@ -16,7 +16,9 @@ Demo with custom GUI (run with `--gui`):
 
 Download the latest release from the [Releases](https://github.com/isaacs-12/nso-gc-bridge/releases) page. Get `nso-gc-bridge-X.X.X.zip`, unzip it, and you'll see the executable Application.
 
-**One-time setup** (Python 3.7+ required):
+<img width="632" height="620" alt="Screenshot 2026-02-01 at 11 50 36 PM" src="https://github.com/user-attachments/assets/411b801b-96ab-45e7-83f4-7ee6439875df" />
+
+**One-time setup if using command line** (Python 3.7+ required):
 
 ```bash
 cd nso-gc-bridge-X.X.X
@@ -25,12 +27,15 @@ source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**To run:** Double-click `NSO GC Bridge` (macOS) or run `python3 launcher.py`. You may need to go into System Settings to whitelist this app. This opens the **launcher** — a GUI with checkboxes for USB/BLE, DSU, controller GUI, and log options, plus a log view. Use **Start Driver** to run, **Stop** to quit.
+**To run:** Double-click `NSO GC Bridge` (macOS) or run `python3 launcher.py`. You may need to go into System Settings to whitelist this app:
+<img width="704" height="617" alt="Screenshot 2026-02-01 at 11 49 51 PM" src="https://github.com/user-attachments/assets/3a3ca188-a8f9-4934-b3a8-be7463c20b8a" />
+
+This opens the **launcher** — a GUI with checkboxes for USB/BLE, DSU, controller GUI, and log options, plus a log view. Use **Start Driver** to run, **Stop** to quit.
 
 ### Quick start
 
-1. **Start the launcher** — Double-click `run.command`. A window opens with connection and option checkboxes.
-2. **Connect the controller** — USB: plug in the cable. BLE: put the controller in pairing mode (hold the pair button until LEDs blink), then select BLE in the launcher and click **Start Driver**.
+1. **Start the launcher** — Double-click `NSO GC Bridge` after downloading the latest release. A window opens with connection and option checkboxes.
+2. **Connect the controller** — USB: plug in the cable to the controller and computer. BLE: put the controller in pairing mode (hold the pair button until LEDs blink), then select BLE in the launcher and click **Start Driver**. You should hold for ~8 seconds, or until the connection is established.
 3. **Configure Dolphin** — Open Dolphin → Controllers → set the port to **DSU Client** → Configure and map buttons. Use `127.0.0.1` and port **26760** if prompted.
 4. **Verify connection** — With the driver running and Dolphin open, the launcher log will show "✓ Dolphin connected" when Dolphin has successfully linked to the DSU server.
 
