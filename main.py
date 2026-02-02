@@ -12,6 +12,7 @@ import time
 import sys
 import threading
 import asyncio
+from collections import deque
 
 # Optional BLE support (for wireless controller not visible as HID)
 try:
@@ -616,6 +617,27 @@ class NSOWirelessDriver(NSODriver):
         self._discover_lock = threading.Lock()
         self._discover_samples = []  # list of (phase, data_list); max 300
         self._discover_phase = None
+        self._init_latency_monitor()
+
+    def _init_latency_monitor(self):
+        """Track inter-arrival time of BLE packets for input lag diagnostics (dash dancing, short hops)."""
+        self._last_packet_time = None
+        self._iat_history = deque(maxlen=100)  # last 100 packets
+
+    def _log_latency(self):
+        """Log IAT stats every 100 packets. Avg 8–10ms = excellent; >20ms = dash dancing suffers."""
+        current_time = time.perf_counter()
+        if self._last_packet_time is not None:
+            delta = (current_time - self._last_packet_time) * 1000
+            self._iat_history.append(delta)
+            if len(self._iat_history) == 100:
+                avg = sum(self._iat_history) / 100
+                max_val = max(self._iat_history)
+                min_val = min(self._iat_history)
+                jitter = (sum((x - avg) ** 2 for x in self._iat_history) / 100) ** 0.5
+                print(f"[Latency] Avg: {avg:.2f}ms | Jitter: {jitter:.2f}ms | Range: [{min_val:.1f}-{max_val:.1f}]")
+                self._iat_history.clear()
+        self._last_packet_time = current_time
 
     def parse_ble_input(self, data):
         """Parse BLE input report. Handles Nintendo formats: 0x3F (simple), reordered (sticks then buttons), standard 0x30.
@@ -881,6 +903,7 @@ class NSOWirelessDriver(NSODriver):
 
     def _notification_handler(self, sender, data):
         """Handle BLE input report notifications. Native NSO (sliding-window) first; 63-byte = BlueRetro layout."""
+        self._log_latency()
         data_list = list(data)
         if getattr(self, 'ble_discover', False) and getattr(self, '_discover_phase', None):
             with self._discover_lock:
