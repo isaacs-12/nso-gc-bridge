@@ -12,6 +12,19 @@ import os
 import threading
 import queue
 
+# Set TCL/TK paths for bundled .app (must run before tkinter import)
+if getattr(sys, "frozen", False):
+    exe_dir = os.path.dirname(sys.executable)
+    resources = os.path.normpath(os.path.join(exe_dir, "..", "Resources"))
+    for tcl_name, tk_name in [("tcl9.0", "tk9.0"), ("tcl8.6", "tk8.6")]:
+        tcl_path = os.path.join(resources, tcl_name)
+        tk_path = os.path.join(resources, tk_name)
+        if os.path.isdir(tcl_path) and os.path.isdir(tk_path):
+            os.environ["TCL_LIBRARY"] = tcl_path
+            os.environ["TK_LIBRARY"] = tk_path
+            break
+
+
 def _get_script_dir():
     """Script directory, or bundle path when frozen (py2app or PyInstaller)."""
     if getattr(sys, "_MEIPASS", None):
@@ -169,13 +182,18 @@ class LauncherApp:
 
         def run():
             try:
+                env = os.environ.copy()
+                env.setdefault("PYTHONIOENCODING", "utf-8")
                 self.process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     cwd=SCRIPT_DIR,
+                    env=env,
                 )
                 self.root.after(0, lambda: self._set_running(True))
                 for line in self.process.stdout:

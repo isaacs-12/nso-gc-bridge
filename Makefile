@@ -3,7 +3,7 @@
 
 VENV_PYTHON := $(shell if [ -f venv/bin/python3 ]; then echo venv/bin/python3; else echo python3; fi)
 
-.PHONY: run build build-alias clean install open run-app release release-publish help
+.PHONY: run build build-alias clean install open run-app release release-publish release-replace help
 
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
 
@@ -21,6 +21,7 @@ help:
 	@echo "  make run-app      - Run app from terminal (shows errors if it crashes)"
 	@echo "  make release      - Create release zip in release/"
 	@echo "  make release-publish VERSION=1.0.0 - Create GitHub release and upload (requires gh)"
+	@echo "  make release-replace VERSION=1.0.1 - Replace assets of existing release (requires gh)"
 	@echo ""
 	@echo "  Or double-click run.command to start the launcher (no .app needed)"
 
@@ -74,3 +75,11 @@ release-publish: release
 	@echo "Creating release v$(VERSION)..."
 	@gh release create "v$(VERSION)" release/*.zip --title "v$(VERSION)" --generate-notes
 	@echo "Done. See: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases"
+
+# Replace existing release assets (build + package + upload with --clobber)
+release-replace: build release
+	@which gh >/dev/null || (echo "Install gh: brew install gh"; echo "Then: gh auth login"; exit 1)
+	@gh release view "v$(VERSION)" >/dev/null 2>&1 || (echo "Release v$(VERSION) does not exist. Use: make release-publish VERSION=$(VERSION)"; exit 1)
+	@echo "Replacing assets for v$(VERSION)..."
+	@gh release upload "v$(VERSION)" release/*.zip --clobber
+	@echo "Done. See: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/v$(VERSION)"
