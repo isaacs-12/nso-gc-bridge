@@ -85,6 +85,8 @@ The driver can measure **inter-arrival time (IAT)** between input reports and pr
 - L, R → L1, R1; Z → R3; ZL → L2Btn
 - Start → Options; Home → PS Button; triggers → L2/R2 analog
 
+A lot of exploration was done in the Bluetooth [implementation](https://github.com/isaacs-12/nso-gc-bridge/pull/1), if you're looking for more details.
+
 ---
 
 ## Developing
