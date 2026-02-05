@@ -11,7 +11,33 @@ import struct
 import zlib
 import time
 import threading
+import subprocess
 from typing import Dict, Optional
+
+
+def free_orphaned_port(port: int = 26760) -> bool:
+    """Kill process(es) holding the DSU port. Returns True if something was killed."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-i", f":{port}", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pids = result.stdout.strip().split()
+        if not pids:
+            return False
+        for pid in pids:
+            try:
+                subprocess.run(["kill", pid], check=True, timeout=2)
+            except subprocess.CalledProcessError:
+                try:
+                    subprocess.run(["kill", "-9", pid], check=True, timeout=2)
+                except subprocess.CalledProcessError:
+                    pass
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        return False
 
 
 class DSUServer:
@@ -24,6 +50,7 @@ class DSUServer:
     
     # DSU Protocol constants
     DSU_PORT = 26760
+    DSU_PORT_MAX_ATTEMPTS = 5  # Try 26760..26764 if port in use
     PROTOCOL_VERSION = 1001
     PACKET_TYPE_VERSION = 0x00100000  # Changed from 0x01000000
     PACKET_TYPE_PAD_INFO = 0x00100001  # Changed from 0x01000001
@@ -32,6 +59,7 @@ class DSUServer:
     def __init__(self, server_id: int = 0):
         self.server_id = server_id
         self.socket = None
+        self.port = self.DSU_PORT  # Actual port in use (may differ if fallback used)
         self.running = False
         self.packet_counter = 0
         self.last_state = None
@@ -45,26 +73,54 @@ class DSUServer:
         self._pad_info_buffer = bytearray(32)
         
     def start(self):
-        """Start the DSU server and the background handler."""
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind(('127.0.0.1', self.DSU_PORT))
-            self.socket.settimeout(0.005)  # 5ms timeout - wakes thread immediately when packet arrives
-            self.running = True
-            
-            # CRITICAL: Start the request handler in a background thread
-            self.thread = threading.Thread(target=self.handle_requests, daemon=True)
-            self.thread.start()
-            
-            
-            print(f"✓ DSU Server started on 127.0.0.1:{self.DSU_PORT}", flush=True)
-            return True
-        except Exception as e:
-            print(f"✗ Failed to start DSU server: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            return False
+        """Start the DSU server and the background handler.
+        Tries ports 26760..26764 if the default is in use (e.g. zombie process)."""
+        last_err = None
+        for attempt in range(self.DSU_PORT_MAX_ATTEMPTS):
+            port = self.DSU_PORT + attempt
+            try:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.socket.bind(('127.0.0.1', port))
+                self.port = port
+                self.socket.settimeout(0.005)  # 5ms timeout - wakes thread immediately when packet arrives
+                self.running = True
+
+                # CRITICAL: Start the request handler in a background thread
+                self.thread = threading.Thread(target=self.handle_requests, daemon=True)
+                self.thread.start()
+
+                if port != self.DSU_PORT:
+                    print(f"✓ DSU Server started on 127.0.0.1:{port} (port {self.DSU_PORT} was in use)", flush=True)
+                    print(f"  Configure Dolphin DSU client to use port {port}", flush=True)
+                    print(f"  To free the default port: python main.py --free-dsu-port (or use launcher's Free orphaned port)", flush=True)
+                else:
+                    print(f"✓ DSU Server started on 127.0.0.1:{port}", flush=True)
+                return True
+            except OSError as e:
+                last_err = e
+                if self.socket:
+                    try:
+                        self.socket.close()
+                    except Exception:
+                        pass
+                    self.socket = None
+                if e.errno != 48:  # 48 = Address already in use
+                    break
+            except Exception as e:
+                last_err = e
+                if self.socket:
+                    try:
+                        self.socket.close()
+                    except Exception:
+                        pass
+                    self.socket = None
+                break
+
+        print(f"✗ Failed to start DSU server: {last_err}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
     
     def stop(self):
         """Stop the DSU server."""

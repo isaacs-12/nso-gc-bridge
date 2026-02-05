@@ -36,7 +36,7 @@ This opens the **launcher** — a GUI with checkboxes for USB/BLE, DSU, controll
 
 1. **Start the launcher** — Double-click `NSO GC Bridge` after downloading the latest release. A window opens with connection and option checkboxes.
 2. **Connect the controller** — USB: plug in the cable to the controller and computer. BLE: put the controller in pairing mode (hold the pair button until LEDs blink), then select BLE in the launcher and click **Start Driver**. You should hold for ~8 seconds, or until the connection is established.
-3. **Configure Dolphin** — Open Dolphin → Controllers → set the port to **DSU Client** → Configure and map buttons. Use `127.0.0.1` and port **26760** if prompted.
+3. **Configure Dolphin** — Open Dolphin → Controllers → set the port to **DSU Client** → Configure and map buttons. Use `127.0.0.1` and port **26760** (or the port shown if the driver used a fallback).
 4. **Verify connection** — With the driver running and Dolphin open, the launcher log will show "✓ Dolphin connected" when Dolphin has successfully linked to the DSU server.
 
 ### Dolphin button mapping
@@ -87,6 +87,13 @@ The driver can measure **inter-arrival time (IAT)** between input reports and pr
 
 A lot of exploration was done in the Bluetooth [implementation](https://github.com/isaacs-12/nso-gc-bridge/pull/1), if you're looking for more details.
 
+### Troubleshooting
+
+- **"Address already in use" (DSU port 26760):** A previous instance may still be running. The driver will try ports 26761, 26762, etc.; if it uses a fallback, configure Dolphin's DSU client to match. To free the port: click **Free orphaned port** in the launcher, or run `python main.py --free-dsu-port`.
+- **Connects to wrong device (not your controller):** The driver filters by Nintendo-like names and HID service. If it still connects to the wrong device, use `--ble-scan` to list addresses, then `--ble --address <ADDR>` to target a specific controller.
+- **Won't connect after restart:** Remove the controller from **System Settings → Bluetooth**, then put it in pairing mode and start the driver first (hold pair button when the script scans).
+- **Multiple controllers:** Use `--ble-scan` to get each controller's address, then `--ble --address <ADDR>` to choose which one.
+
 ---
 
 ## Developing
@@ -115,6 +122,7 @@ pip install -r requirements.txt
 | Find BLE address  | `python3 main.py --ble-scan`      |
 | Log + latency     | `python3 main.py --log path/to/file.jsonl` |
 | Disable DSU       | `python3 main.py --no-dsu`        |
+| Free orphaned port| `python3 main.py --free-dsu-port` |
 
 ### Building
 

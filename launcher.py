@@ -48,7 +48,7 @@ except ImportError:
     sys.exit(1)
 
 
-def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, log_path):
+def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, use_discover, log_path):
     """Build the command list for main.py based on selected options."""
     cmd = [sys.executable, "main.py"]
     if use_ble:
@@ -56,9 +56,13 @@ def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, log_path):
         if ble_address and ble_address.strip():
             cmd.extend(["--address", ble_address.strip()])
         if use_debug:
-            cmd.append("--ble-debug")  # Debug only works with BLE (raw byte dumps)
+            cmd.append("--ble-debug")
+        if use_discover:
+            cmd.append("--ble-discover")
     else:
         cmd.append("--usb")
+        if use_debug:
+            cmd.append("--debug")
     if not use_dsu:
         cmd.append("--no-dsu")
     if use_gui:
@@ -72,8 +76,8 @@ class LauncherApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("NSO GameCube Controller Bridge")
-        self.root.minsize(420, 380)
-        self.root.geometry("520x480")
+        self.root.minsize(420, 420)
+        self.root.geometry("560x560")
 
         self.process = None  # subprocess when driver is running
         self.log_queue = queue.Queue()
@@ -100,19 +104,30 @@ class LauncherApp:
         self.ble_address_entry = ttk.Entry(addr_frame, textvariable=self.ble_address_var, width=45)
         self.ble_address_entry.pack(fill=tk.X, pady=2)
 
+        scan_frame = ttk.Frame(conn_frame)
+        scan_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(scan_frame, text="Scan for BLE devices", command=self._on_ble_scan).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(scan_frame, text="Find BLE controller (scan diff)", command=self._on_ble_scan_diff).pack(side=tk.LEFT)
+
         # --- Options ---
         opt_frame = ttk.LabelFrame(main, text="Options", padding=5)
         opt_frame.pack(fill=tk.X, pady=(0, 5))
 
         self.dsu_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="DSU server (Dolphin)", variable=self.dsu_var).pack(anchor=tk.W)
+        dsu_row = ttk.Frame(opt_frame)
+        dsu_row.pack(fill=tk.X)
+        ttk.Checkbutton(dsu_row, text="DSU server (Dolphin)", variable=self.dsu_var).pack(side=tk.LEFT)
+        ttk.Button(dsu_row, text="Free orphaned port", command=self._on_free_port).pack(side=tk.LEFT, padx=(10, 0))
 
         self.gui_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frame, text="Show controller GUI", variable=self.gui_var).pack(anchor=tk.W)
 
         self.debug_var = tk.BooleanVar(value=False)
-        self.debug_cb = ttk.Checkbutton(opt_frame, text="Debug (BLE only: raw byte dumps)", variable=self.debug_var)
-        self.debug_cb.pack(anchor=tk.W)
+        ttk.Checkbutton(opt_frame, text="Debug (raw bytes, latency)", variable=self.debug_var).pack(anchor=tk.W)
+
+        self.discover_var = tk.BooleanVar(value=False)
+        self.discover_cb = ttk.Checkbutton(opt_frame, text="BLE discover (interactive calibration)", variable=self.discover_var)
+        self.discover_cb.pack(anchor=tk.W)
 
         log_opt = ttk.Frame(opt_frame)
         log_opt.pack(fill=tk.X, pady=(2, 0))
@@ -132,37 +147,145 @@ class LauncherApp:
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
 
+        self.send_enter_btn = ttk.Button(btn_frame, text="Send Enter", command=self._on_send_enter, state=tk.DISABLED)
+        self.send_enter_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.send_enter_hint = ttk.Label(btn_frame, text="(Enter key or click when prompted)", foreground="gray")
+        self.send_enter_hint.pack(side=tk.LEFT)
+
         # --- Log view ---
         log_frame = ttk.LabelFrame(main, text="Log", padding=5)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=12, wrap=tk.WORD, font=("Menlo", 10))
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=12, wrap=tk.WORD, font=("Menlo", 10), state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._update_debug_visibility()
-        self.conn_var.trace_add("write", lambda *a: self._update_debug_visibility())
+        self.interactive_hint = ttk.Label(log_frame, text="", foreground="blue")
+        self.interactive_hint.pack(anchor=tk.W, pady=(2, 0))
 
-    def _update_debug_visibility(self):
-        """Show debug option only for BLE (USB doesn't support it)."""
+        # Bind Enter key to send to interactive process (works when Send Enter is enabled)
+        self.root.bind("<Return>", self._on_enter_key)
+        self.root.bind("<KP_Enter>", self._on_enter_key)
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._update_ble_options_visibility()
+        self.conn_var.trace_add("write", lambda *a: self._update_ble_options_visibility())
+
+    def _update_ble_options_visibility(self):
+        """Show BLE-only options only when BLE is selected."""
         use_ble = self.conn_var.get() == "ble"
         if use_ble:
-            self.debug_cb.config(state=tk.NORMAL)
+            self.discover_cb.config(state=tk.NORMAL)
         else:
-            self.debug_var.set(False)
-            self.debug_cb.config(state=tk.DISABLED)
+            self.discover_var.set(False)
+            self.discover_cb.config(state=tk.DISABLED)
 
     def _log(self, msg):
+        self.log_text.config(state=tk.NORMAL)
         self.log_text.insert(tk.END, msg)
         self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+
+    def _on_free_port(self):
+        """Kill process holding DSU port 26760."""
+        try:
+            from dsu_server import free_orphaned_port, DSUServer
+            if free_orphaned_port(DSUServer.DSU_PORT):
+                self._log(f"✓ Freed port {DSUServer.DSU_PORT}\n")
+            else:
+                self._log(f"Port {DSUServer.DSU_PORT} is not in use (nothing to free)\n")
+        except Exception as e:
+            self._log(f"Could not free port: {e}\n")
+
+    def _on_ble_scan(self):
+        """Run --ble-scan and show output in log."""
+        self._log("\n>>> Scanning for BLE devices (put controller in pairing mode)...\n\n")
+        def run():
+            try:
+                result = subprocess.run(
+                    [sys.executable, "main.py", "--ble-scan"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=SCRIPT_DIR,
+                    timeout=25,
+                )
+                out = (result.stdout or "") + (result.stderr or "")
+                self.log_queue.put(("append", out + "\n"))
+            except subprocess.TimeoutExpired:
+                self.log_queue.put(("append", "[Scan timed out]\n"))
+            except Exception as e:
+                self.log_queue.put(("append", f"[Error: {e}]\n"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_ble_scan_diff(self):
+        """Run --ble-scan-diff (interactive). Uses main process slot; click Send Enter when prompted."""
+        if self.process and self.process.poll() is None:
+            self._log("\nStop the driver first, then click Find BLE controller.\n")
+            return
+        cmd = [sys.executable, "main.py", "--ble-scan-diff"]
+        self._log(f">>> {' '.join(cmd)}\n\n")
+        self._run_interactive_process(cmd)
+
+    def _on_send_enter(self):
+        """Send Enter to the running process (for interactive prompts)."""
+        self._send_enter_to_process()
+
+    def _on_enter_key(self, event=None):
+        """Handle Enter key - send to process when interactive, else do nothing."""
+        if self._send_enter_to_process():
+            return "break"  # Consume key so it doesn't insert newline in focused widget
+
+    def _send_enter_to_process(self):
+        """Send Enter to the running process. Returns True if sent."""
+        if self.process and self.process.poll() is None and self.process.stdin:
+            try:
+                self.process.stdin.write("\n")
+                self.process.stdin.flush()
+                return True
+            except Exception:
+                pass
+        return False
+
+    def _run_interactive_process(self, cmd):
+        """Run a process with stdin=PIPE so user can send Enter via button."""
+        def run():
+            try:
+                env = os.environ.copy()
+                env.setdefault("PYTHONIOENCODING", "utf-8")
+                env["PYTHONUNBUFFERED"] = "1"
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    cwd=SCRIPT_DIR,
+                    env=env,
+                )
+                self.root.after(0, lambda: self._set_running(True))
+                for line in self.process.stdout:
+                    self.log_queue.put(("append", line))
+                self.process.wait()
+            except Exception as e:
+                self.log_queue.put(("append", f"\n[Error: {e}]\n"))
+            finally:
+                self.root.after(0, lambda: self._set_running(False))
+                self.log_queue.put(("append", f"\n[Process exited with code {self.process.returncode if self.process else 'N/A'}]\n"))
+        threading.Thread(target=run, daemon=True).start()
 
     def _poll_log_queue(self):
         try:
             while True:
                 action, data = self.log_queue.get_nowait()
                 if action == "append":
+                    self.log_text.config(state=tk.NORMAL)
                     self.log_text.insert(tk.END, data)
                     self.log_text.see(tk.END)
+                    self.log_text.config(state=tk.DISABLED)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_log_queue)
@@ -175,17 +298,22 @@ class LauncherApp:
         use_dsu = self.dsu_var.get()
         use_gui = self.gui_var.get()
         use_debug = self.debug_var.get()
+        use_discover = use_ble and self.discover_var.get()
         log_path = self.log_path_var.get() if self.log_var.get() else None
 
-        cmd = build_command(use_ble, ble_addr, use_dsu, use_gui, use_debug, log_path)
+        cmd = build_command(use_ble, ble_addr, use_dsu, use_gui, use_debug, use_discover, log_path)
         self._log(f">>> {' '.join(cmd)}\n\n")
+
+        use_stdin = use_discover  # BLE discover needs Enter for interactive prompts
 
         def run():
             try:
                 env = os.environ.copy()
                 env.setdefault("PYTHONIOENCODING", "utf-8")
+                env["PYTHONUNBUFFERED"] = "1"
                 self.process = subprocess.Popen(
                     cmd,
+                    stdin=subprocess.PIPE if use_stdin else subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -210,6 +338,12 @@ class LauncherApp:
     def _set_running(self, running):
         self.start_btn.config(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
+        # Send Enter enabled when process runs and has stdin (discover or scan-diff)
+        has_stdin = running and self.process and self.process.stdin is not None
+        self.send_enter_btn.config(state=tk.NORMAL if has_stdin else tk.DISABLED)
+        self.interactive_hint.config(
+            text="Press Enter (or click Send Enter) when the log prompts you." if has_stdin else ""
+        )
 
     def _on_stop(self):
         if self.process and self.process.poll() is None:

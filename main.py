@@ -37,7 +37,6 @@ BLE_SCAN_AUTO_SEC = 10
 # BLE connection interval: units of 1.25ms. 6=7.5ms (min), 12=15ms. Request before connect on Linux to get USB-like latency.
 BLE_CONN_MIN_INTERVAL_UNITS = 6   # 7.5ms
 BLE_CONN_MAX_INTERVAL_UNITS = 12  # 15ms
-
 # Import DSU server support
 try:
     from dsu_server import DSUServer
@@ -1032,7 +1031,8 @@ class NSOWirelessDriver(NSODriver):
 
         # Wait for connection and neutral baseline
         for attempt in range(30):
-            input("\n1. Release ALL buttons and put both sticks at CENTER. Press Enter when ready... ")
+            print("\n1. Release ALL buttons and put both sticks at CENTER. Press Enter when ready...")
+            input()
             samples = self._discover_collect("neutral", 2.5)
             if len(samples) < 5:
                 print(f"   No data yet ({len(samples)} samples). Is the controller connected? Retry.")
@@ -1062,7 +1062,8 @@ class NSOWirelessDriver(NSODriver):
         ]
         button_results = []
         for name in button_steps:
-            input(f"   Hold ONLY [{name}]. Press Enter when holding... ")
+            print(f"   Hold ONLY [{name}]. Press Enter when holding...")
+            input()
             samples = self._discover_collect(name, 2.5)
             if len(samples) < 3:
                 print(f"      (too few samples, skipping)")
@@ -1103,7 +1104,8 @@ class NSOWirelessDriver(NSODriver):
         ]
         stick_results = []
         for label, key in stick_steps:
-            input(f"   Move {label} only (others center). Press Enter when holding... ")
+            print(f"   Move {label} only (others center). Press Enter when holding...")
+            input()
             samples = self._discover_collect(key, 2.5)
             if len(samples) < 3:
                 print(f"      (too few samples, skipping)")
@@ -1187,20 +1189,34 @@ class NSOWirelessDriver(NSODriver):
                     self._try_set_ble_connection_interval_linux()
                     if not self.address:
                         # Scan then connect once to first device that accepts handshake (no disconnect in between).
-                        print("Scanning for controller... Hold the pair button.")
+                        print("Scanning for controller... Hold the pair button.", flush=True)
+                        print(f"  Scanning for {BLE_SCAN_AUTO_SEC} seconds...", flush=True)
                         if BleakScanner is None:
                             await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
                             continue
-                        devices = await BleakScanner.discover(timeout=BLE_SCAN_AUTO_SEC)
+                        # Single scan; use return_adv for RSSI so we try closest device first (likely the controller)
+                        try:
+                            discovered = await BleakScanner.discover(timeout=BLE_SCAN_AUTO_SEC, return_adv=True)
+                        except TypeError:
+                            discovered = {d.address: (d, None) for d in await BleakScanner.discover(timeout=BLE_SCAN_AUTO_SEC)}
+                        devices = [d for d, _ in discovered.values()]
                         if not devices:
-                            print("  No controller found. Hold the pair button and we'll retry.")
+                            print("  No controller found. Hold the pair button and we'll retry.", flush=True)
                             await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
                             continue
+                        print(f"  Found {len(devices)} device(s), trying to connect (strongest signal first)...", flush=True)
                         name_by_addr = {d.address: (d.name or "(no name)").strip() for d in devices}
-                        def _sort_key(addr):
+                        def _sort_key(d):
+                            addr = d.address
                             name = (name_by_addr.get(addr, "") or "").lower()
-                            return (0 if name == "devicename" else 1, 0 if "nintendo" in name else 1, addr)
-                        ordered = sorted(devices, key=lambda d: _sort_key(d.address))
+                            rssi = -999
+                            if addr in discovered:
+                                _, adv = discovered[addr]
+                                if adv is not None and hasattr(adv, 'rssi') and adv.rssi is not None:
+                                    rssi = adv.rssi
+                            # Strongest RSSI first, then devicename, then nintendo, then address
+                            return (-rssi, 0 if name == "devicename" else 1, 0 if "nintendo" in name else 1, addr)
+                        ordered = sorted(devices, key=_sort_key)
                         client = None
                         handshake_char = None
                         for d in ordered:
@@ -1230,7 +1246,7 @@ class NSOWirelessDriver(NSODriver):
                                     continue
                                 client = c
                                 self.address = d.address
-                                print(f"  Found controller at {self.address}")
+                                print(f"  Found controller at {self.address}", flush=True)
                                 break
                             except Exception:
                                 try:
@@ -1239,12 +1255,12 @@ class NSOWirelessDriver(NSODriver):
                                     pass
                                 continue
                         if client is None:
-                            print("  No controller found. Hold the pair button and we'll retry.")
+                            print("  No controller found. Hold the pair button and we'll retry.", flush=True)
                             await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
                             continue
                         # Stay connected: subscribe, send LED/slot, then main loop (no second connect).
                         try:
-                            print("✓ Connected! Discovering characteristics...")
+                            print("✓ Connected! Discovering characteristics...", flush=True)
                             notify_chars = []
                             for svc in client.services:
                                 for char in svc.characteristics:
@@ -1253,7 +1269,7 @@ class NSOWirelessDriver(NSODriver):
                                         notify_chars.append(char)
                             if not notify_chars:
                                 raise RuntimeError("No notify/indicate characteristic found")
-                            print(f"  Subscribing to {len(notify_chars)} notify char(s)...")
+                            print(f"  Subscribing to {len(notify_chars)} notify char(s)...", flush=True)
                             if self.log_file:
                                 print("  Latency stats ([Latency] Avg/Jitter/Range) printed here every ~100 reports.")
                             for char in notify_chars:
@@ -1268,7 +1284,7 @@ class NSOWirelessDriver(NSODriver):
                                     await client.write_gatt_char(handshake_char.uuid, SET_INPUT_MODE)
                                 except Exception:
                                     pass
-                                print("  ✓ Slot/LED report sent (controller may stop blinking)")
+                                print("  ✓ Slot/LED report sent (controller may stop blinking)", flush=True)
                             while self.running:
                                 await asyncio.sleep(0.1)
                         finally:
@@ -1279,9 +1295,9 @@ class NSOWirelessDriver(NSODriver):
                         break
                     else:
                         # Address already known (e.g. --address): connect as before.
-                        print(f"Connecting to {self.address}...")
+                        print(f"Connecting to {self.address}...", flush=True)
                         async with BleakClient(self.address, timeout=10.0) as client:
-                            print("✓ Connected! Discovering characteristics...")
+                            print("✓ Connected! Discovering characteristics...", flush=True)
                             notify_chars = []
                             write_chars = []
                             for svc in client.services:
@@ -1295,7 +1311,7 @@ class NSOWirelessDriver(NSODriver):
                                 raise RuntimeError("No notify/indicate characteristic found")
                             if not write_chars:
                                 raise RuntimeError("No write characteristic found")
-                            print(f"  Subscribing to {len(notify_chars)} notify char(s), trying handshake on {len(write_chars)} write char(s)...")
+                            print(f"  Subscribing to {len(notify_chars)} notify char(s), trying handshake on {len(write_chars)} write char(s)...", flush=True)
                             if self.log_file:
                                 print("  Latency stats ([Latency] Avg/Jitter/Range) printed here every ~100 reports.")
                             for char in notify_chars:
@@ -1328,7 +1344,7 @@ class NSOWirelessDriver(NSODriver):
                                     await client.write_gatt_char(handshake_char.uuid, SET_INPUT_MODE)
                                 except Exception:
                                     pass
-                                print("  ✓ Slot/LED report sent (controller may stop blinking)")
+                                print("  ✓ Slot/LED report sent (controller may stop blinking)", flush=True)
                             while self.running:
                                 await asyncio.sleep(0.1)
                         break
@@ -1337,14 +1353,14 @@ class NSOWirelessDriver(NSODriver):
                 except Exception as e:
                     if not self.running:
                         break
-                    print(f"  Not yet: {e}")
-                    print(f"  Retrying in {BLE_CONNECT_RETRY_SEC}s...")
+                    print(f"  Not yet: {e}", flush=True)
+                    print(f"  Retrying in {BLE_CONNECT_RETRY_SEC}s...", flush=True)
                     await asyncio.sleep(BLE_CONNECT_RETRY_SEC)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             if self.running:
-                print(f"\nBLE error: {e}")
+                print(f"\nBLE error: {e}", flush=True)
         finally:
             self._ble_loop = None
 
@@ -1357,6 +1373,8 @@ class NSOWirelessDriver(NSODriver):
         else:
             print("No address given: we'll scan for the controller. Hold the pair button when starting.")
         print("Controller not in system Bluetooth list? Start this script first, then hold pair.")
+        print("Multiple controllers? Use --ble-scan to get addresses, then --ble --address <ADDR>.")
+        print("Won't connect after restart? Remove from System Settings > Bluetooth, then pair again.")
 
         if not BLE_AVAILABLE:
             print("✗ bleak not installed. Run: pip install bleak")
@@ -1942,7 +1960,17 @@ def main():
                        help='Two scans in one run: first with controller ON (pairing mode), then OFF. Prints the address that disappeared (your controller).')
     parser.add_argument('--ble-discover', action='store_true',
                        help='Interactive BLE calibration: prompts for each button/stick; logs raw byte changes. Use with --ble (--address optional).')
+    parser.add_argument('--free-dsu-port', action='store_true',
+                       help='Kill process holding DSU port 26760 (for orphaned/zombie instances), then exit.')
     args = parser.parse_args()
+
+    if getattr(args, 'free_dsu_port', False):
+        from dsu_server import free_orphaned_port, DSUServer
+        if free_orphaned_port(DSUServer.DSU_PORT):
+            print(f"✓ Freed port {DSUServer.DSU_PORT}")
+        else:
+            print(f"Port {DSUServer.DSU_PORT} is not in use (nothing to free)")
+        return 0
     
     # Set up log file
     log_file = args.log
@@ -1999,14 +2027,16 @@ def main():
             return 1
         print("BLE scan (diff): we will run two short scans.")
         print("First scan: controller ON (pairing mode). Second scan: controller OFF.\n")
-        input("Put controller in pairing mode, then press Enter to start first scan... ")
+        print("Put controller in pairing mode, then press Enter to start first scan...")
+        input()
         print(f"Scanning for {BLE_SCAN_DIFF_DURATION_SEC} seconds...")
         devices_on = asyncio.run(
             BleakScanner.discover(timeout=BLE_SCAN_DIFF_DURATION_SEC)
         )
         addrs_on = {d.address for d in devices_on}
         print(f"  First scan: {len(devices_on)} device(s).\n")
-        input("Turn controller OFF, then press Enter to start second scan... ")
+        print("Turn controller OFF, then press Enter to start second scan...")
+        input()
         print(f"Scanning for {BLE_SCAN_DIFF_DURATION_SEC} seconds...")
         devices_off = asyncio.run(
             BleakScanner.discover(timeout=BLE_SCAN_DIFF_DURATION_SEC)
@@ -2045,7 +2075,8 @@ def main():
                 return False
 
         print("\nTrying each candidate (only the real controller accepts the handshake). Timeout 1.5s each.")
-        input("Put controller in pairing mode again, then press Enter... ")
+        print("Put controller in pairing mode again, then press Enter...")
+        input()
         controller_addr = None
         for addr in ordered:
             print(f"  Trying {addr}...", end=" ", flush=True)
