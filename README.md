@@ -6,7 +6,7 @@
 
 Download the latest release from the [Releases](https://github.com/isaacs-12/nso-gc-bridge/releases) page. Get `nso-gc-bridge-X.X.X.zip`, unzip it, and you'll see the executable Application.
 
-<img width="672" height="700" alt="Screenshot 2026-02-04 at 7 38 26 PM" src="https://github.com/user-attachments/assets/66d2b8c4-9564-484f-b0f6-5269bf79092e" />
+<img width="672" height="700" alt="Screenshot 2026-02-04 at 9 42 09 PM" src="https://github.com/user-attachments/assets/cbd7b3ce-a17f-4ea6-b6ef-2cd4bd6d7589" />
 
 ### Quick start
 
@@ -30,6 +30,21 @@ Be sure to map each button as desired
 
 
 4. **Verify connection** — With the driver running and Dolphin open, the launcher log will show "✓ Dolphin connected" when Dolphin has successfully linked to the DSU server.
+
+### For Using Multiple NSO GC Controllers
+
+1. Select **Multi-controller** in the launcher
+
+<img width="551" height="246" alt="Screenshot 2026-02-04 at 9 43 15 PM" src="https://github.com/user-attachments/assets/93e97545-4b6f-47db-8f87-ccf879e38c3f" />
+
+2. Pick the slots/ports you want to use (this maps through Dolphin)
+3. Select the connection method (USB/BLE)
+4. If you have saved controllers, select them and assign to the slots. (If you haven't saved controllers, you may need to save them first, as I write this I realize I didn't test scanning here)
+5. Click **Start Driver**. This time in the logs, you should see multiple controllers connecting, with a line like `✓ Dolphin connected` for each one.
+6. In Dolphin, when configuring the controller, you should see them in devices (might need to refresh) as `DSUClient/<slot>/<What you named it>`
+
+<img width="914" height="719" alt="Screenshot 2026-02-04 at 9 49 24 PM" src="https://github.com/user-attachments/assets/ea1b011f-c0d6-4688-8d5e-8b2e3e09dc3c" />
+
 
 ### Dolphin button mapping
 
