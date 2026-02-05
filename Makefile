@@ -37,6 +37,8 @@ build: install
 	rm -rf build dist
 	$(VENV_PYTHON) setup.py py2app
 	@if [ -d dist/launcher.app ]; then mv dist/launcher.app "dist/NSO GC Bridge.app"; fi
+	@# py2app wrongly creates hid.py (binary) alongside lib-dynload/hid.so; remove it so Python loads the .so
+	@rm -f "dist/NSO GC Bridge.app/Contents/Resources/lib/python3.13/hid.py" 2>/dev/null || true
 
 build-alias:
 	rm -rf build dist
@@ -60,6 +62,7 @@ run-app:
 # Release packaging (no gh needed)
 release:
 	@mkdir -p release
+	@rm -f release/nso-gc-bridge-*.zip release/NSO-GC-Bridge-*-macOS.zip
 	@echo "Creating nso-gc-bridge-$(VERSION).zip..."
 	@git archive --format=zip --prefix=nso-gc-bridge-$(VERSION)/ HEAD -o release/nso-gc-bridge-$(VERSION).zip
 	@if [ -d "dist/NSO GC Bridge.app" ]; then \
@@ -73,7 +76,7 @@ release:
 release-publish: release
 	@which gh >/dev/null || (echo "Install gh: brew install gh"; echo "Then: gh auth login"; exit 1)
 	@echo "Creating release v$(VERSION)..."
-	@gh release create "v$(VERSION)" release/*.zip --title "v$(VERSION)" --generate-notes
+	@gh release create "v$(VERSION)" release/nso-gc-bridge-$(VERSION).zip release/NSO-GC-Bridge-$(VERSION)-macOS.zip --title "v$(VERSION)" --generate-notes
 	@echo "Done. See: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases"
 
 # Replace existing release assets (build + package + upload with --clobber)
@@ -81,5 +84,5 @@ release-replace: build release
 	@which gh >/dev/null || (echo "Install gh: brew install gh"; echo "Then: gh auth login"; exit 1)
 	@gh release view "v$(VERSION)" >/dev/null 2>&1 || (echo "Release v$(VERSION) does not exist. Use: make release-publish VERSION=$(VERSION)"; exit 1)
 	@echo "Replacing assets for v$(VERSION)..."
-	@gh release upload "v$(VERSION)" release/*.zip --clobber
+	@gh release upload "v$(VERSION)" release/nso-gc-bridge-$(VERSION).zip release/NSO-GC-Bridge-$(VERSION)-macOS.zip --clobber
 	@echo "Done. See: https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/v$(VERSION)"
