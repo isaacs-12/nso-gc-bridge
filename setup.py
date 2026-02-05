@@ -14,7 +14,7 @@ import os
 from setuptools import setup
 
 APP = ["launcher.py"]
-DATA_FILES = ["main.py", "dsu_server.py"]
+DATA_FILES = ["main.py", "dsu_server.py", "controller_storage.py"]
 
 
 def _find_tcl_tk_frameworks():

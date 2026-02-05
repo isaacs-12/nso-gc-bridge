@@ -41,14 +41,67 @@ SCRIPT_DIR = _get_script_dir()
 os.chdir(SCRIPT_DIR)
 
 try:
+    from controller_storage import load_controllers, save_controllers, add_controller, remove_controller, get_last_connected
+except ImportError:
+    def load_controllers():
+        return []
+    def save_controllers(_):
+        pass
+    def add_controller(addr, name):
+        pass
+    def remove_controller(addr):
+        pass
+    def get_last_connected():
+        return None
+
+try:
     import tkinter as tk
-    from tkinter import ttk, scrolledtext, messagebox
+    from tkinter import ttk, scrolledtext, messagebox, simpledialog
 except ImportError:
     print("tkinter is required for the launcher. Install python-tk or use system Python.")
     sys.exit(1)
 
 
-def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, use_discover, log_path):
+class ToolTip:
+    """Show a tooltip on hover after a short delay."""
+    def __init__(self, widget, text, delay_ms=500):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.tip_window = None
+        self.after_id = None
+        widget.bind("<Enter>", self._on_enter)
+        widget.bind("<Leave>", self._on_leave)
+
+    def _on_enter(self, event=None):
+        self.after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _on_leave(self, event=None):
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        self._hide()
+
+    def _show(self):
+        self.after_id = None
+        if self.tip_window:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                         relief=tk.SOLID, borderwidth=1, font=("TkDefaultFont", 9), padx=4, pady=2)
+        label.pack()
+
+    def _hide(self):
+        if self.tip_window:
+            self.tip_window.destroy()
+            self.tip_window = None
+
+
+def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, log_path):
     """Build the command list for main.py based on selected options."""
     cmd = [sys.executable, "main.py"]
     if use_ble:
@@ -57,8 +110,6 @@ def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, use_discove
             cmd.extend(["--address", ble_address.strip()])
         if use_debug:
             cmd.append("--ble-debug")
-        if use_discover:
-            cmd.append("--ble-discover")
     else:
         cmd.append("--usb")
         if use_debug:
@@ -94,20 +145,41 @@ class LauncherApp:
         conn_frame.pack(fill=tk.X, pady=(0, 5))
 
         self.conn_var = tk.StringVar(value="usb")
-        ttk.Radiobutton(conn_frame, text="USB (wired)", variable=self.conn_var, value="usb").pack(anchor=tk.W)
-        ttk.Radiobutton(conn_frame, text="BLE (wireless)", variable=self.conn_var, value="ble").pack(anchor=tk.W)
+        usb_rb = ttk.Radiobutton(conn_frame, text="USB (wired)", variable=self.conn_var, value="usb")
+        usb_rb.pack(anchor=tk.W)
+        ToolTip(usb_rb, "Connect controller via USB cable. Ideal for low input latency (~4ms)")
+        ble_rb = ttk.Radiobutton(conn_frame, text="BLE (wireless)", variable=self.conn_var, value="ble")
+        ble_rb.pack(anchor=tk.W)
+        ToolTip(ble_rb, "Connect controller wirelessly. Hold pair button when scanning.")
 
         addr_frame = ttk.Frame(conn_frame)
         addr_frame.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(addr_frame, text="BLE address (optional, leave empty to auto-discover):").pack(anchor=tk.W)
-        self.ble_address_var = tk.StringVar()
-        self.ble_address_entry = ttk.Entry(addr_frame, textvariable=self.ble_address_var, width=45)
-        self.ble_address_entry.pack(fill=tk.X, pady=2)
+        ttk.Label(addr_frame, text="Select Saved Controller (or scan for new):").pack(anchor=tk.W)
+        self.ble_controller_var = tk.StringVar(value="Scan for controller")
+        self.ble_controller_combo = ttk.Combobox(addr_frame, textvariable=self.ble_controller_var, width=42, state="readonly")
+        self.ble_controller_combo.pack(fill=tk.X, pady=2)
+        ToolTip(self.ble_controller_combo, "Pick a saved controller to connect directly, or Scan to find a new one.")
+        self._refresh_controller_combo()
 
-        scan_frame = ttk.Frame(conn_frame)
-        scan_frame.pack(fill=tk.X, pady=(5, 0))
-        ttk.Button(scan_frame, text="Scan for BLE devices", command=self._on_ble_scan).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(scan_frame, text="Find BLE controller (scan diff)", command=self._on_ble_scan_diff).pack(side=tk.LEFT)
+        manage_frame = ttk.Frame(conn_frame)
+        manage_frame.pack(fill=tk.X, pady=(2, 0))
+        manage_btn = ttk.Button(manage_frame, text="Manage saved controllers", command=self._on_manage_saved)
+        manage_btn.pack(side=tk.LEFT)
+        ToolTip(manage_btn, "Add, remove, or rename saved controllers. Use Add last connected during/after a successful connection to save the controller for easy connection in the future.")
+
+        self.advanced_expanded = False
+        self.advanced_toggle = ttk.Label(conn_frame, text="▶ Advanced", cursor="hand2")
+        self.advanced_toggle.pack(anchor=tk.W, pady=(5, 0))
+        self.advanced_toggle.bind("<Button-1>", self._toggle_advanced)
+        ToolTip(self.advanced_toggle, "Show scan tools for finding controller addresses.")
+
+        self.advanced_frame = ttk.Frame(conn_frame)
+        scan_btn = ttk.Button(self.advanced_frame, text="Scan for BLE devices", command=self._on_ble_scan)
+        scan_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(scan_btn, "List nearby BLE devices. Put controller in pairing mode first. Copy an address to add in Manage.")
+        diff_btn = ttk.Button(self.advanced_frame, text="Find BLE controller (scan diff)", command=self._on_ble_scan_diff)
+        diff_btn.pack(side=tk.LEFT)
+        ToolTip(diff_btn, "Two scans: controller ON then OFF. Identifies your controller among multiple BLE devices. Use Send Enter when prompted.")
 
         # --- Options ---
         opt_frame = ttk.LabelFrame(main, text="Options", padding=5)
@@ -116,26 +188,22 @@ class LauncherApp:
         self.dsu_var = tk.BooleanVar(value=True)
         dsu_row = ttk.Frame(opt_frame)
         dsu_row.pack(fill=tk.X)
-        ttk.Checkbutton(dsu_row, text="DSU server (Dolphin)", variable=self.dsu_var).pack(side=tk.LEFT)
-        ttk.Button(dsu_row, text="Free orphaned port", command=self._on_free_port).pack(side=tk.LEFT, padx=(10, 0))
+        dsu_cb = ttk.Checkbutton(dsu_row, text="DSU server (Dolphin)", variable=self.dsu_var)
+        dsu_cb.pack(side=tk.LEFT)
+        ToolTip(dsu_cb, "Enable DSU server so Dolphin can use the controller. Required for emulator input.")
+        free_btn = ttk.Button(dsu_row, text="Free orphaned port", command=self._on_free_port)
+        free_btn.pack(side=tk.LEFT, padx=(10, 0))
+        ToolTip(free_btn, "Kill any process holding port 26760. Use when you see 'Address already in use'.")
 
         self.gui_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_frame, text="Show controller GUI", variable=self.gui_var).pack(anchor=tk.W)
+        gui_cb = ttk.Checkbutton(opt_frame, text="Show controller GUI", variable=self.gui_var)
+        gui_cb.pack(anchor=tk.W)
+        ToolTip(gui_cb, "Open a window showing live button and stick input. Useful for debugging")
 
         self.debug_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt_frame, text="Debug (raw bytes, latency)", variable=self.debug_var).pack(anchor=tk.W)
-
-        self.discover_var = tk.BooleanVar(value=False)
-        self.discover_cb = ttk.Checkbutton(opt_frame, text="BLE discover (interactive calibration)", variable=self.discover_var)
-        self.discover_cb.pack(anchor=tk.W)
-
-        log_opt = ttk.Frame(opt_frame)
-        log_opt.pack(fill=tk.X, pady=(2, 0))
-        self.log_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(log_opt, text="Log to file:", variable=self.log_var).pack(side=tk.LEFT)
-        self.log_path_var = tk.StringVar(value="latency.jsonl")
-        self.log_path_entry = ttk.Entry(log_opt, textvariable=self.log_path_var, width=25)
-        self.log_path_entry.pack(side=tk.LEFT, padx=5)
+        debug_cb = ttk.Checkbutton(opt_frame, text="Debug (latency)", variable=self.debug_var)
+        debug_cb.pack(anchor=tk.W)
+        ToolTip(debug_cb, "Print input latency stats every ~100 reports. Measures time between input reports sent over BLE or USB.")
 
         # --- Buttons ---
         btn_frame = ttk.Frame(main)
@@ -143,12 +211,15 @@ class LauncherApp:
 
         self.start_btn = ttk.Button(btn_frame, text="Start Driver", command=self._on_start)
         self.start_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(self.start_btn, "Start the controller driver. For BLE, hold pair button if scanning.")
 
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(self.stop_btn, "Stop the running driver.")
 
         self.send_enter_btn = ttk.Button(btn_frame, text="Send Enter", command=self._on_send_enter, state=tk.DISABLED)
         self.send_enter_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(self.send_enter_btn, "Advance interactive prompts (Find BLE controller). Or press Enter key.")
         self.send_enter_hint = ttk.Label(btn_frame, text="(Enter key or click when prompted)", foreground="gray")
         self.send_enter_hint.pack(side=tk.LEFT)
 
@@ -167,17 +238,119 @@ class LauncherApp:
         self.root.bind("<KP_Enter>", self._on_enter_key)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._update_ble_options_visibility()
-        self.conn_var.trace_add("write", lambda *a: self._update_ble_options_visibility())
 
-    def _update_ble_options_visibility(self):
-        """Show BLE-only options only when BLE is selected."""
-        use_ble = self.conn_var.get() == "ble"
-        if use_ble:
-            self.discover_cb.config(state=tk.NORMAL)
+    def _toggle_advanced(self, event=None):
+        """Expand or collapse the Advanced section."""
+        self.advanced_expanded = not self.advanced_expanded
+        if self.advanced_expanded:
+            self.advanced_frame.pack(fill=tk.X, pady=(2, 0))
+            self.advanced_toggle.config(text="▼ Advanced")
         else:
-            self.discover_var.set(False)
-            self.discover_cb.config(state=tk.DISABLED)
+            self.advanced_frame.pack_forget()
+            self.advanced_toggle.config(text="▶ Advanced")
+
+    def _refresh_controller_combo(self):
+        """Reload saved controllers into the dropdown."""
+        controllers = load_controllers()
+        values = ["Scan for controller"]
+        self._controller_map = {}  # name -> address
+        for c in controllers:
+            name = c.get("name", c["address"])
+            addr = c["address"]
+            values.append(name)
+            self._controller_map[name] = addr
+        self.ble_controller_combo["values"] = values
+        last = get_last_connected()
+        if last and last in [c["address"] for c in controllers]:
+            for c in controllers:
+                if c["address"] == last:
+                    self.ble_controller_var.set(c.get("name", last))
+                    break
+        elif self.ble_controller_var.get() not in values:
+            self.ble_controller_var.set("Scan for controller")
+
+    def _get_ble_address(self):
+        """Return the BLE address to use (empty for scan)."""
+        sel = self.ble_controller_var.get()
+        if sel == "Scan for controller" or not sel:
+            return ""
+        return getattr(self, "_controller_map", {}).get(sel, "")
+
+    def _on_manage_saved(self):
+        """Open dialog to add/remove/rename saved controllers."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Saved Controllers")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.geometry("500x300")
+
+        main = ttk.Frame(dlg, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main, text="Saved controllers (connect directly without scanning):").pack(anchor=tk.W)
+        list_frame = ttk.Frame(main)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        listbox = tk.Listbox(list_frame, height=8)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(list_frame, command=listbox.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.config(yscrollcommand=scroll.set)
+
+        def refresh_list():
+            listbox.delete(0, tk.END)
+            for c in load_controllers():
+                listbox.insert(tk.END, f"{c.get('name', 'Unnamed')}  ({c['address'][:20]}...)")
+
+        refresh_list()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill=tk.X, pady=5)
+        add_btn = ttk.Button(btn_frame, text="Add...", command=lambda: _add_dialog(dlg, refresh_list))
+        add_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(add_btn, "Add a controller by address and name. Get address from Scan or Find BLE controller.")
+        rem_btn = ttk.Button(btn_frame, text="Remove", command=lambda: _remove_selected(listbox, refresh_list))
+        rem_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(rem_btn, "Remove the selected controller from saved list.")
+        last_btn = ttk.Button(btn_frame, text="Add last connected", command=lambda: _add_last(dlg, refresh_list))
+        last_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(last_btn, "Save the controller you just connected to. Connect first, then add here.")
+        close_btn = ttk.Button(btn_frame, text="Close", command=dlg.destroy)
+        close_btn.pack(side=tk.RIGHT)
+        ToolTip(close_btn, "Close this dialog.")
+
+        def _add_dialog(parent, refresh):
+            addr = simpledialog.askstring("Add Controller", "BLE address:", parent=parent)
+            if addr and addr.strip():
+                name = simpledialog.askstring("Add Controller", "Name for this controller:", parent=parent)
+                if name is not None:
+                    add_controller(addr.strip(), name.strip() or addr.strip())
+                    refresh()
+                    self._refresh_controller_combo()
+
+        def _remove_selected(lb, refresh):
+            sel = lb.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            controllers = load_controllers()
+            if 0 <= idx < len(controllers):
+                remove_controller(controllers[idx]["address"])
+                refresh()
+                self._refresh_controller_combo()
+
+        def _add_last(parent, refresh):
+            addr = get_last_connected()
+            if not addr:
+                messagebox.showinfo("Add Last Connected", "No last connected address. Connect to a controller first.", parent=parent)
+                return
+            if addr in [c["address"] for c in load_controllers()]:
+                messagebox.showinfo("Add Last Connected", "Already saved.", parent=parent)
+                return
+            name = simpledialog.askstring("Add Controller", f"Name for {addr[:24]}...:", parent=parent)
+            if name is not None:
+                add_controller(addr, name.strip() or addr[:16])
+                refresh()
+                self._refresh_controller_combo()
 
     def _log(self, msg):
         self.log_text.config(state=tk.NORMAL)
@@ -294,17 +467,15 @@ class LauncherApp:
         if self.process and self.process.poll() is None:
             return
         use_ble = self.conn_var.get() == "ble"
-        ble_addr = self.ble_address_var.get()
+        ble_addr = self._get_ble_address() if use_ble else ""
         use_dsu = self.dsu_var.get()
         use_gui = self.gui_var.get()
         use_debug = self.debug_var.get()
-        use_discover = use_ble and self.discover_var.get()
-        log_path = self.log_path_var.get() if self.log_var.get() else None
 
-        cmd = build_command(use_ble, ble_addr, use_dsu, use_gui, use_debug, use_discover, log_path)
+        cmd = build_command(use_ble, ble_addr, use_dsu, use_gui, use_debug, None)
         self._log(f">>> {' '.join(cmd)}\n\n")
 
-        use_stdin = use_discover  # BLE discover needs Enter for interactive prompts
+        use_stdin = False
 
         def run():
             try:
@@ -338,7 +509,7 @@ class LauncherApp:
     def _set_running(self, running):
         self.start_btn.config(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
-        # Send Enter enabled when process runs and has stdin (discover or scan-diff)
+        # Send Enter enabled when process runs and has stdin (scan-diff)
         has_stdin = running and self.process and self.process.stdin is not None
         self.send_enter_btn.config(state=tk.NORMAL if has_stdin else tk.DISABLED)
         self.interactive_hint.config(

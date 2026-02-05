@@ -116,7 +116,7 @@ SET_INPUT_MODE = bytearray([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 class NSODriver:
     """NSO GameCube Controller Driver."""
     
-    def __init__(self, use_gui=False, log_file=None, use_dsu=False):
+    def __init__(self, use_gui=False, log_file=None, use_dsu=False, debug=False):
         self.usb_device = None
         self.hid_device = None
         self.running = False
@@ -125,6 +125,7 @@ class NSODriver:
         self.current_state = None
         self.gui_window = None
         self.log_file = log_file
+        self.debug = debug
         self.last_log_time = 0
         self.log_interval = 1.0  # Log every 1 second
         
@@ -161,8 +162,8 @@ class NSODriver:
                 jitter = (sum((x - avg) ** 2 for x in self._iat_history) / 100) ** 0.5
                 msg = f"[Latency] Avg: {avg:.2f}ms | Jitter: {jitter:.2f}ms | Range: [{min_val:.1f}-{max_val:.1f}]"
                 self._iat_history.clear()
-                if self.log_file:
-                    threading.Thread(target=lambda m=msg: print(m), daemon=True).start()
+                if self.log_file or getattr(self, 'debug', False):
+                    threading.Thread(target=lambda m=msg: print(m, flush=True), daemon=True).start()
         self._last_packet_time = current_time
 
     def find_usb_device(self):
@@ -1285,6 +1286,11 @@ class NSOWirelessDriver(NSODriver):
                                 except Exception:
                                     pass
                                 print("  ✓ Slot/LED report sent (controller may stop blinking)", flush=True)
+                            try:
+                                from controller_storage import set_last_connected
+                                set_last_connected(self.address)
+                            except Exception:
+                                pass
                             while self.running:
                                 await asyncio.sleep(0.1)
                         finally:
@@ -1345,6 +1351,11 @@ class NSOWirelessDriver(NSODriver):
                                 except Exception:
                                     pass
                                 print("  ✓ Slot/LED report sent (controller may stop blinking)", flush=True)
+                            try:
+                                from controller_storage import set_last_connected
+                                set_last_connected(self.address)
+                            except Exception:
+                                pass
                             while self.running:
                                 await asyncio.sleep(0.1)
                         break
@@ -2018,8 +2029,8 @@ def main():
         print(f"Starting in GUI mode ({GUI_TYPE})...")
     else:
         print("Starting in terminal mode (use --gui for visual interface)...")
-        if args.debug:
-            print("Debug mode: Will show raw byte dumps")
+        if args.debug or getattr(args, 'ble_debug', False):
+            print("Debug mode: Latency stats every ~100 input reports")
 
     if getattr(args, 'ble_scan_diff', False):
         if not BLE_AVAILABLE or BleakScanner is None:
@@ -2138,9 +2149,10 @@ def main():
             use_gui=use_gui if not getattr(args, 'ble_discover', False) else False,
             log_file=log_file,
             use_dsu=not getattr(args, 'no_dsu', False) and not getattr(args, 'ble_discover', False),
+            debug=args.ble_debug,
         )
     else:
-        driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=not getattr(args, 'no_dsu', False))
+        driver = NSODriver(use_gui=use_gui, log_file=log_file, use_dsu=not getattr(args, 'no_dsu', False), debug=getattr(args, 'debug', False))
 
     try:
         driver.start()
