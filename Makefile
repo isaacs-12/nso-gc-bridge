@@ -3,7 +3,7 @@
 
 VENV_PYTHON := $(shell if [ -f venv/bin/python3 ]; then echo venv/bin/python3; else echo python3; fi)
 
-.PHONY: run build build-alias clean install open run-app release release-publish release-replace help
+.PHONY: run build build-alias clean install open run-app icon release release-publish release-replace help
 
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
 
@@ -13,6 +13,7 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  make run          - Run the launcher UI"
+	@echo "  make icon         - Convert assets/NSO_GC_BRIDGE.png to .icns (requires Pillow)"
 	@echo "  make build        - Build .app with py2app"
 	@echo "  make build-alias  - Build dev .app (alias mode, uses source in-place)"
 	@echo "  make clean        - Remove build artifacts"
@@ -32,6 +33,9 @@ install:
 	$(VENV_PYTHON) -m pip install "setuptools<71"  # py2app has Errno 17 with setuptools>=71
 	$(VENV_PYTHON) -m pip install -r requirements.txt
 	$(VENV_PYTHON) -m pip install py2app
+
+icon:
+	@$(VENV_PYTHON) -c "from PIL import Image; img = Image.open('assets/NSO_GC_BRIDGE.png').convert('RGBA'); img.save('assets/NSO_GC_BRIDGE.icns', format='ICNS'); print('Created assets/NSO_GC_BRIDGE.icns')" || (echo "Run: pip install Pillow" && exit 1)
 
 build: install
 	rm -rf build dist

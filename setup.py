@@ -50,6 +50,7 @@ def _find_tcl_tk_resources():
 OPTIONS = {
     "py2app": {
         "argv_emulation": False,  # Don't use with GUI toolkits
+        "iconfile": os.path.join(os.path.dirname(__file__), "assets", "NSO_GC_BRIDGE.icns"),
         "resources": _find_tcl_tk_resources(),
         "packages": ["usb", "bleak", "tkinter"],  # Python packages
         "includes": ["tkinter", "hid"],  # hid is C extension (.so); include so it goes to lib-dynload
