@@ -2,16 +2,20 @@
 py2app build script for NSO GameCube Controller Bridge.
 
 Usage:
-  python setup.py py2app        # Build standalone .app (for distribution)
-  python setup.py py2app -A      # Alias mode (development, uses source in-place)
+  make build                    # Build .app (version from git or VERSION=1.0.0)
+  make build VERSION=1.0.0      # Build with specific version (shows in About dialog)
+  python setup.py py2app -A     # Alias mode (development, uses source in-place)
 
-For best results, use Python from python.org (not Homebrew) - it includes
-Tcl/Tk that bundles correctly. Homebrew Python links to a separate tcl-tk
-that py2app may not bundle properly.
+The plist (CFBundleVersion, NSHumanReadableCopyright) controls the About dialog.
+Edit COPYRIGHT in this file to set the copyright string.
 """
 
 import os
 from setuptools import setup
+
+# Version and copyright - set VERSION=1.0.0 when building: make build VERSION=1.0.0
+VERSION = os.environ.get("VERSION", "1.0.0")
+COPYRIGHT = "Copyright © 2026 Isaac Smith"  # Shown in About dialog
 
 APP = ["launcher.py"]
 DATA_FILES = ["main.py", "dsu_server.py", "controller_storage.py"]
@@ -60,8 +64,9 @@ OPTIONS = {
             "CFBundleName": "NSO GC Bridge",
             "CFBundleDisplayName": "NSO GameCube Controller Bridge",
             "CFBundleIdentifier": "com.nso-gc-bridge.launcher",
-            "CFBundleVersion": "1.0.0",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleVersion": VERSION,
+            "CFBundleShortVersionString": VERSION,
+            "NSHumanReadableCopyright": COPYRIGHT,
             "NSHighResolutionCapable": True,
         },
     }
