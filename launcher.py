@@ -41,7 +41,10 @@ SCRIPT_DIR = _get_script_dir()
 os.chdir(SCRIPT_DIR)
 
 try:
-    from controller_storage import load_controllers, save_controllers, add_controller, remove_controller, get_last_connected
+    from controller_storage import (
+        load_controllers, save_controllers, add_controller, remove_controller,
+        get_last_connected, load_slots_config, save_slots_config,
+    )
 except ImportError:
     def load_controllers():
         return []
@@ -53,6 +56,10 @@ except ImportError:
         pass
     def get_last_connected():
         return None
+    def load_slots_config():
+        return []
+    def save_slots_config(_):
+        pass
 
 try:
     import tkinter as tk
@@ -101,9 +108,19 @@ class ToolTip:
             self.tip_window = None
 
 
-def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, log_path):
-    """Build the command list for main.py based on selected options."""
+def build_command(use_ble, ble_address, use_dsu, use_gui, use_debug, log_path, multi_slots=None):
+    """Build the command list for main.py based on selected options.
+    If multi_slots is not None, use multi-controller mode (list of {slot, type, address?})."""
     cmd = [sys.executable, "main.py"]
+    if multi_slots is not None:
+        cmd.append("--multi")
+        if not use_dsu:
+            cmd.append("--no-dsu")
+        if use_debug:
+            cmd.append("--debug")
+        if log_path and log_path.strip():
+            cmd.extend(["--log", log_path.strip()])
+        return cmd
     if use_ble:
         cmd.append("--ble")
         if ble_address and ble_address.strip():
@@ -144,15 +161,24 @@ class LauncherApp:
         conn_frame = ttk.LabelFrame(main, text="Connection", padding=5)
         conn_frame.pack(fill=tk.X, pady=(0, 5))
 
+        self.multi_var = tk.BooleanVar(value=False)
+        multi_cb = ttk.Checkbutton(conn_frame, text="Multi-controller (assign slots)", variable=self.multi_var,
+                                   command=self._toggle_multi_mode)
+        multi_cb.pack(anchor=tk.W)
+        ToolTip(multi_cb, "Connect 2–4 controllers. Assign each to a Dolphin port (slot 0–3).")
+
+        self.single_frame = ttk.Frame(conn_frame)
+        self.single_frame.pack(fill=tk.X, pady=(5, 0))
+
         self.conn_var = tk.StringVar(value="usb")
-        usb_rb = ttk.Radiobutton(conn_frame, text="USB (wired)", variable=self.conn_var, value="usb")
+        usb_rb = ttk.Radiobutton(self.single_frame, text="USB (wired)", variable=self.conn_var, value="usb")
         usb_rb.pack(anchor=tk.W)
         ToolTip(usb_rb, "Connect controller via USB cable. Ideal for low input latency (~4ms)")
-        ble_rb = ttk.Radiobutton(conn_frame, text="BLE (wireless)", variable=self.conn_var, value="ble")
+        ble_rb = ttk.Radiobutton(self.single_frame, text="BLE (wireless)", variable=self.conn_var, value="ble")
         ble_rb.pack(anchor=tk.W)
         ToolTip(ble_rb, "Connect controller wirelessly. Hold pair button when scanning.")
 
-        addr_frame = ttk.Frame(conn_frame)
+        addr_frame = ttk.Frame(self.single_frame)
         addr_frame.pack(fill=tk.X, pady=(5, 0))
         ttk.Label(addr_frame, text="Select Saved Controller (or scan for new):").pack(anchor=tk.W)
         self.ble_controller_var = tk.StringVar(value="Scan for controller")
@@ -160,6 +186,11 @@ class LauncherApp:
         self.ble_controller_combo.pack(fill=tk.X, pady=2)
         ToolTip(self.ble_controller_combo, "Pick a saved controller to connect directly, or Scan to find a new one.")
         self._refresh_controller_combo()
+
+        self.multi_frame = ttk.Frame(conn_frame)
+        self.multi_hint = ttk.Label(self.multi_frame, text="", foreground="gray")
+        self._build_multi_slots_ui()
+        self.multi_hint.pack(anchor=tk.W, pady=(0, 2))
 
         manage_frame = ttk.Frame(conn_frame)
         manage_frame.pack(fill=tk.X, pady=(2, 0))
@@ -180,6 +211,8 @@ class LauncherApp:
         diff_btn = ttk.Button(self.advanced_frame, text="Find BLE controller (scan diff)", command=self._on_ble_scan_diff)
         diff_btn.pack(side=tk.LEFT)
         ToolTip(diff_btn, "Two scans: controller ON then OFF. Identifies your controller among multiple BLE devices. Use Send Enter when prompted.")
+
+        self._toggle_multi_mode()
 
         # --- Options ---
         opt_frame = ttk.LabelFrame(main, text="Options", padding=5)
@@ -239,6 +272,102 @@ class LauncherApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _build_multi_slots_ui(self):
+        """Build the 4-slot grid for multi-controller mode."""
+        self.slot_vars = []
+        self.slot_combos = []
+        self._controller_map = getattr(self, "_controller_map", {})
+        for slot in range(4):
+            row = ttk.Frame(self.multi_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=f"Slot {slot} (Port {slot + 1}):", width=14, anchor=tk.W).pack(side=tk.LEFT, padx=(0, 5))
+            type_var = tk.StringVar(value="empty")
+            self.slot_vars.append(type_var)
+            for val, lbl in [("empty", "Empty"), ("usb", "USB"), ("ble", "BLE")]:
+                rb = ttk.Radiobutton(row, text=lbl, variable=type_var, value=val,
+                                     command=lambda s=slot: self._on_slot_type_change(s))
+                rb.pack(side=tk.LEFT, padx=(0, 8))
+            combo = ttk.Combobox(row, width=28, state="readonly")
+            self.slot_combos.append(combo)
+            combo.bind("<<ComboboxSelected>>", lambda e, s=slot: self._on_slot_combo_change(s))
+
+    def _refresh_slot_combos(self):
+        """Refresh BLE controller dropdowns for all slots."""
+        controllers = load_controllers()
+        values = ["Scan for controller"]
+        self._controller_map = {}
+        for c in controllers:
+            name = c.get("name", c["address"])
+            addr = c["address"]
+            values.append(name)
+            self._controller_map[name] = addr
+        for combo in self.slot_combos:
+            combo["values"] = values
+            if combo.get() not in values:
+                combo.set("Scan for controller")
+
+    def _on_slot_type_change(self, slot):
+        """Show/hide BLE combo when slot type changes."""
+        combo = self.slot_combos[slot]
+        if self.slot_vars[slot].get() == "ble":
+            combo.pack(side=tk.LEFT, padx=(5, 0))
+        else:
+            combo.pack_forget()
+
+    def _on_slot_combo_change(self, slot):
+        pass  # Selection stored in combo
+
+    def _update_multi_hint(self):
+        """Update USB count hint in multi-controller mode."""
+        try:
+            from main import count_usb_controllers
+            n = count_usb_controllers()
+            self.multi_hint.config(text=f"({n} USB controller(s) detected)" if n else "(No USB controllers detected)")
+        except Exception:
+            self.multi_hint.config(text="")
+
+    def _toggle_multi_mode(self):
+        """Show single or multi-controller UI based on checkbox."""
+        if self.multi_var.get():
+            self.single_frame.pack_forget()
+            self.multi_frame.pack(fill=tk.X, pady=(5, 0))
+            self._refresh_slot_combos()
+            self._update_multi_hint()
+            saved = load_slots_config()
+            slot_to_cfg = {c["slot"]: c for c in saved}
+            for i in range(4):
+                cfg = slot_to_cfg.get(i)
+                if cfg:
+                    self.slot_vars[i].set(cfg.get("type", "empty"))
+                    if cfg.get("type") == "ble" and cfg.get("address"):
+                        for c in load_controllers():
+                            if c["address"] == cfg["address"]:
+                                self.slot_combos[i].set(c.get("name", c["address"]))
+                                break
+                else:
+                    self.slot_vars[i].set("empty")
+                self._on_slot_type_change(i)
+        else:
+            self.multi_frame.pack_forget()
+            self.single_frame.pack(fill=tk.X, pady=(5, 0))
+
+    def _get_multi_slots_config(self):
+        """Build slots config from UI. Returns list of {slot, type, address?} or None if not multi."""
+        if not self.multi_var.get():
+            return None
+        slots = []
+        for slot in range(4):
+            type_var = self.slot_vars[slot].get()
+            if type_var == "empty":
+                continue
+            cfg = {"slot": slot, "type": type_var}
+            if type_var == "ble":
+                sel = self.slot_combos[slot].get()
+                addr = self._controller_map.get(sel, "") if sel and sel != "Scan for controller" else ""
+                cfg["address"] = addr
+            slots.append(cfg)
+        return slots if slots else None
+
     def _toggle_advanced(self, event=None):
         """Expand or collapse the Advanced section."""
         self.advanced_expanded = not self.advanced_expanded
@@ -260,6 +389,9 @@ class LauncherApp:
             values.append(name)
             self._controller_map[name] = addr
         self.ble_controller_combo["values"] = values
+        if hasattr(self, "slot_combos"):
+            for combo in self.slot_combos:
+                combo["values"] = values
         last = get_last_connected()
         if last and last in [c["address"] for c in controllers]:
             for c in controllers:
@@ -466,13 +598,20 @@ class LauncherApp:
     def _on_start(self):
         if self.process and self.process.poll() is None:
             return
-        use_ble = self.conn_var.get() == "ble"
-        ble_addr = self._get_ble_address() if use_ble else ""
+        multi_slots = self._get_multi_slots_config()
         use_dsu = self.dsu_var.get()
         use_gui = self.gui_var.get()
         use_debug = self.debug_var.get()
 
-        cmd = build_command(use_ble, ble_addr, use_dsu, use_gui, use_debug, None)
+        if multi_slots is not None:
+            save_slots_config(multi_slots)
+            use_ble = False
+            ble_addr = ""
+        else:
+            use_ble = self.conn_var.get() == "ble"
+            ble_addr = self._get_ble_address() if use_ble else ""
+
+        cmd = build_command(use_ble, ble_addr, use_dsu, use_gui, use_debug, None, multi_slots)
         self._log(f">>> {' '.join(cmd)}\n\n")
 
         use_stdin = False
