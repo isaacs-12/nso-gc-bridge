@@ -39,8 +39,15 @@ icon:
 
 build: install
 	rm -rf build dist
-	$(VENV_PYTHON) setup.py py2app
+	VERSION="$(VERSION)" $(VENV_PYTHON) setup.py py2app
 	@if [ -d dist/launcher.app ]; then mv dist/launcher.app "dist/NSO GC Bridge.app"; fi
+	@# py2app ignores plist overrides; patch Info.plist for version and copyright
+	@APP="dist/NSO GC Bridge.app"; \
+	if [ -d "$$APP" ]; then \
+		/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION)" "$$APP/Contents/Info.plist"; \
+		/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" "$$APP/Contents/Info.plist"; \
+		/usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright 'Copyright © 2026 Isaac Smith'" "$$APP/Contents/Info.plist"; \
+	fi
 	@# py2app wrongly creates hid.py (binary) alongside lib-dynload/hid.so; remove it so Python loads the .so
 	@rm -f "dist/NSO GC Bridge.app/Contents/Resources/lib/python3.13/hid.py" 2>/dev/null || true
 
@@ -63,8 +70,8 @@ run-app:
 	elif [ -f "$$ALT" ]; then "$$ALT" 2>&1; \
 	else echo "App not found. Run 'make build' first."; exit 1; fi
 
-# Release packaging (no gh needed)
-release:
+# Release packaging (no gh needed) - builds .app first so macOS zip is included
+release: build
 	@mkdir -p release
 	@rm -f release/nso-gc-bridge-*.zip release/NSO-GC-Bridge-*-macOS.zip
 	@echo "Creating nso-gc-bridge-$(VERSION).zip..."
