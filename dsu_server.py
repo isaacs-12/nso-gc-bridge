@@ -12,7 +12,7 @@ import zlib
 import time
 import threading
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 
 def free_orphaned_port(port: int = 26760) -> bool:
@@ -62,11 +62,11 @@ class DSUServer:
         self.port = self.DSU_PORT  # Actual port in use (may differ if fallback used)
         self.running = False
         self.packet_counter = 0
-        self.last_state = None
+        # Multi-slot: state and button latch per pad (0-3)
+        self.last_state_by_slot: Dict[int, Dict] = {}
+        self.pending_presses_by_slot: Dict[int, Set[str]] = {}
         self.thread = None
         self._logged_clients = set()
-        # State latch: Store buttons that haven't been "seen" by Dolphin yet
-        self.pending_presses = set()
         # Pre-allocate packet buffers to avoid GC pressure
         self._pad_data_buffer = bytearray(100)
         self._version_buffer = bytearray(24)
@@ -135,10 +135,11 @@ class DSUServer:
         """Calculate CRC32 checksum for packet."""
         return zlib.crc32(data) & 0xFFFFFFFF
     
-    def _create_pad_info_packet(self, pad_id: int = 0, connected: bool = True, server_id: int = None) -> bytes:
+    def _create_pad_info_packet(self, pad_id: int = 0, connected: bool = True, server_id: int = None, connection_type: int = 0x01) -> bytes:
         """
         Create a DSU pad info packet (response to Pad Info Request).
-        
+        connection_type: 0x01=USB, 0x02=Bluetooth
+
         Total size: 32 bytes (16 header + 4 type + 12 payload)
         """
         if server_id is None:
@@ -161,11 +162,11 @@ class DSUServer:
         
         # Pad Info
         packet[20] = pad_id
-        packet[21] = 0x02  # Connected
+        packet[21] = 0x02 if connected else 0x00  # 2=Connected, 0=Not connected
         # Model: 0x02 = DualShock 4
         packet[22] = 0x02
-        # Connection: 0x01 = USB
-        packet[23] = 0x01
+        # Connection: 0x01 = USB, 0x02 = Bluetooth
+        packet[23] = connection_type if connected else 0x00
         # MAC Address (6 bytes)
         packet[24:30] = bytes([0x00, 0x11, 0x22, 0x33, 0x44, pad_id])
         
@@ -181,10 +182,11 @@ class DSUServer:
         
         return bytes(packet)
     
-    def _create_pad_data_packet(self, state: Dict, pad_id: int = 0) -> bytes:
+    def _create_pad_data_packet(self, state: Dict, pad_id: int = 0, connection_type: int = 0x01) -> bytes:
         """
         Create a DSU pad data packet. Parses on-demand from raw bytes for minimum latency.
-        
+        connection_type: 0x01=USB, 0x02=Bluetooth
+
         Packet format (100 bytes total):
         - Header: "DSUS" (4 bytes)
         - Protocol version: 1001 (2 bytes, LE)
@@ -213,10 +215,8 @@ class DSUServer:
         
         # Get buttons and apply state latch - force pending presses to True
         buttons = parsed.get('buttons', {}).copy()  # Copy to avoid modifying original
-        # Before packing buttons, force any 'pending' presses to True
-        # This ensures that even if the user released the button,
-        # we send a 'Pressed' state for at least one DSU packet.
-        for btn in list(self.pending_presses):
+        pending = self.pending_presses_by_slot.get(pad_id, set())
+        for btn in list(pending):
             buttons[btn] = True
         
         sticks = parsed.get('sticks', {})
@@ -253,8 +253,8 @@ class DSUServer:
         
         # Model: 0x02 = DualShock 4 (full gyro)
         packet[22] = 0x02
-        # Connection: 0x01 = USB
-        packet[23] = 0x01
+        # Connection: 0x01 = USB, 0x02 = Bluetooth
+        packet[23] = connection_type
         
         # MAC Address: Use a fake MAC (6 bytes)
         packet[24:30] = bytes([0x00, 0x11, 0x22, 0x33, 0x44, pad_id])
@@ -396,9 +396,9 @@ class DSUServer:
         packet[8:12] = crc_field_backup
         struct.pack_into('<I', packet, 8, crc32)
         
-        # CLEAR the latch after creating the packet
-        # This ensures each pressed button is sent at least once
-        self.pending_presses.clear()
+        # Clear the latch for this pad after creating the packet
+        if pad_id in self.pending_presses_by_slot:
+            self.pending_presses_by_slot[pad_id].clear()
         
         return bytes(packet)
     
@@ -439,39 +439,82 @@ class DSUServer:
                 num_slots = struct.unpack('<i', data[20:24])[0]
                 slots_to_report = [data[24+i] for i in range(num_slots)] if len(data) >= 24 + num_slots else [0]
                 req_server_id = struct.unpack('<I', data[12:16])[0] if len(data) >= 16 else self.server_id
+                connected_slots = set(self.last_state_by_slot.keys())
                 
                 for slot_id in slots_to_report:
-                    # We only want Slot 0 to be our GameCube controller
-                    is_connected = (slot_id == 0)
-                    packet = self._create_pad_info_packet(pad_id=slot_id, connected=is_connected, server_id=req_server_id)
+                    is_connected = slot_id in connected_slots
+                    conn_type = self._get_connection_type_for_slot(slot_id)
+                    packet = self._create_pad_info_packet(
+                        pad_id=slot_id, connected=is_connected, server_id=req_server_id,
+                        connection_type=conn_type
+                    )
                     self.socket.sendto(packet, addr)
         except Exception:
             pass  # Silently ignore pad info errors
     
-    def update(self, state: Dict):
+    def _get_connection_type_for_slot(self, slot_id: int) -> int:
+        """Return 0x01=USB or 0x02=BLE for slot. Stored in state as 'connection_type' or default USB."""
+        state = self.last_state_by_slot.get(slot_id)
+        if state and isinstance(state.get('connection_type'), int):
+            return state['connection_type']
+        return 0x01
+    
+    def update(self, state: Dict, pad_id: int = 0, connection_type: int = 0x01):
         """
-        Update controller state (stored for responding to client requests).
+        Update controller state for a slot (stored for responding to client requests).
         Tracks button presses in a latch to ensure quick taps aren't dropped.
         
         Args:
             state: Dictionary containing buttons, sticks, triggers
+            pad_id: DSU slot (0-3) this controller maps to
+            connection_type: 0x01=USB, 0x02=Bluetooth (for pad info display)
         """
+        # Store connection type in state for pad info responses
+        state_with_meta = dict(state)
+        state_with_meta['connection_type'] = connection_type
+        
         # Check for new presses and add them to the latch
         if 'parsed' in state:
             btns = state['parsed'].get('buttons', {})
         else:
             btns = state.get('buttons', {})
         
-        # Track any newly pressed buttons
+        pending = self.pending_presses_by_slot.setdefault(pad_id, set())
         for btn, pressed in btns.items():
             if pressed:
-                self.pending_presses.add(btn)
+                pending.add(btn)
         
-        self.last_state = state
+        self.last_state_by_slot[pad_id] = state_with_meta
+    
+    def _get_requested_slots(self, data: bytes) -> set:
+        """Parse Pad Data Request to get which slots the client wants. Returns set of slot ids (0-3)."""
+        if len(data) < 22:
+            return {0}  # Legacy: assume slot 0
+        flags = data[20]
+        if flags == 0:
+            return {0, 1, 2, 3}  # Subscribe to all
+        if flags & 1:  # Slot-based
+            slot = data[21] & 0x03  # Clamp to 0-3
+            return {slot}
+        # MAC-based or unknown: default to all connected
+        return {0, 1, 2, 3}
+    
+    def _send_pad_data_to_client(self, addr, requested_slots: set):
+        """Send pad data packets for each requested slot that has state."""
+        for pad_id in requested_slots:
+            state = self.last_state_by_slot.get(pad_id)
+            if state:
+                conn_type = self._get_connection_type_for_slot(pad_id)
+                packet = self._create_pad_data_packet(state, pad_id=pad_id, connection_type=conn_type)
+                try:
+                    self.socket.sendto(packet, addr)
+                except Exception:
+                    pass
     
     def handle_requests(self):
         """Handle incoming DSU client requests (runs in background thread). Prioritizes reactive mode."""
-        clients = set()  # Track connected clients
+        # clients[addr] = set of slot ids they requested
+        clients: Dict[tuple, set] = {}
         last_update_time = 0
         update_interval = 1.0 / 1000.0  # 1000Hz = 1ms for maximum responsiveness
         
@@ -481,51 +524,38 @@ class DSUServer:
             
             try:
                 # Use socket timeout to wake thread IMMEDIATELY when packet arrives (reactive mode)
-                # This lets the OS wake the thread the MOMENT a packet arrives - lowest latency path
                 data, addr = self.socket.recvfrom(1024)
                 
-                # IMMEDIATELY process and respond - this is the lowest latency path
                 if data and len(data) >= 20:
-                    # Check magic bytes - Dolphin sends "DSUC" (Client -> Server)
                     magic = data[0:4]
                     if magic == b'DSUC':
-                        # The message type is at bytes 16-19 (Little Endian)
                         msg_type = struct.unpack('<I', data[16:20])[0]
                         
                         if msg_type == self.PACKET_TYPE_VERSION:
-                            # Protocol Version Request - respond immediately
                             self._respond_version(data, addr)
                         
                         elif msg_type == self.PACKET_TYPE_PAD_INFO:
-                            # Dolphin is asking: "Who is connected?" - respond immediately
                             self._respond_pad_info(data, addr)
                         
                         elif msg_type == self.PACKET_TYPE_PAD_DATA:
-                            # Pad Data Request - SEND IMMEDIATELY (reactive mode)
-                            clients.add(addr)
-                            if self.last_state:
-                                packet = self._create_pad_data_packet(self.last_state, pad_id=0)
-                                self.socket.sendto(packet, addr)
-                                # Log connection once
-                                if addr not in self._logged_clients:
-                                    print(f"✓ Dolphin connected", flush=True)
-                                    self._logged_clients.add(addr)
+                            requested_slots = self._get_requested_slots(data)
+                            clients[addr] = requested_slots
+                            self._send_pad_data_to_client(addr, requested_slots)
+                            if addr not in self._logged_clients:
+                                print(f"✓ Dolphin connected", flush=True)
+                                self._logged_clients.add(addr)
             
             except socket.timeout:
-                # Only if no request came in, do we do the 1000Hz push logic
                 current_time = time.time()
-                if self.last_state and clients and (current_time - last_update_time) >= update_interval:
-                    packet = self._create_pad_data_packet(self.last_state, pad_id=0)
-                    for client_addr in clients.copy():
+                if clients and self.last_state_by_slot and (current_time - last_update_time) >= update_interval:
+                    for client_addr, requested_slots in list(clients.items()):
                         try:
-                            self.socket.sendto(packet, client_addr)
+                            self._send_pad_data_to_client(client_addr, requested_slots)
                         except Exception:
-                            clients.discard(client_addr)
+                            clients.pop(client_addr, None)
                     last_update_time = current_time
             
             except OSError:
-                # Socket closed
                 break
             except Exception:
-                # Silently continue on other errors
                 pass

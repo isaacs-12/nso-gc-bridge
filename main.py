@@ -116,7 +116,8 @@ SET_INPUT_MODE = bytearray([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 class NSODriver:
     """NSO GameCube Controller Driver."""
     
-    def __init__(self, use_gui=False, log_file=None, use_dsu=False, debug=False):
+    def __init__(self, use_gui=False, log_file=None, use_dsu=False, debug=False, dsu_server=None,
+                 dsu_pad_id=0, dsu_connection_type=0x01, device_index=0):
         self.usb_device = None
         self.hid_device = None
         self.running = False
@@ -128,11 +129,19 @@ class NSODriver:
         self.debug = debug
         self.last_log_time = 0
         self.log_interval = 1.0  # Log every 1 second
+        self.dsu_pad_id = dsu_pad_id
+        self.dsu_connection_type = dsu_connection_type
+        self.device_index = device_index
         
-        # DSU server support (UDP-based, works on all platforms!)
-        self.dsu_server = None
-        if use_dsu and DSU_AVAILABLE:
+        # DSU server: use shared when provided, else create our own
+        self._dsu_owned = False
+        if dsu_server is not None:
+            self.dsu_server = dsu_server
+        elif use_dsu and DSU_AVAILABLE:
             self.dsu_server = DSUServer()
+            self._dsu_owned = True
+        else:
+            self.dsu_server = None
         
         # Calibration offsets (assume controller starts in neutral position)
         self.calibration = {
@@ -166,27 +175,27 @@ class NSODriver:
                     threading.Thread(target=lambda m=msg: print(m, flush=True), daemon=True).start()
         self._last_packet_time = current_time
 
-    def find_usb_device(self):
-        """Find USB device and get endpoints."""
-        self.usb_device = usb.core.find(idVendor=VID, idProduct=PID)
-        if self.usb_device is None:
+    def find_usb_device(self, device_index: int = 0):
+        """Find USB device and get endpoints. device_index=0 for first, 1 for second, etc."""
+        devices = list(usb.core.find(find_all=True, idVendor=VID, idProduct=PID))
+        if device_index >= len(devices):
             return False
+        self.usb_device = devices[device_index]
         
         try:
             if self.usb_device.is_kernel_driver_active(INTERFACE_NUM):
                 self.usb_device.detach_kernel_driver(INTERFACE_NUM)
-        except:
+        except Exception:
             pass
         
         try:
             self.usb_device.set_configuration()
-        except:
+        except Exception:
             pass
         
-        # Find bulk OUT endpoint
         cfg = self.usb_device.get_active_configuration()
         intf = cfg[(INTERFACE_NUM, 0)]
-        
+        self.out_endpoint = None
         for ep in intf:
             if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT:
                 if (ep.bmAttributes & 0x03) == usb.util.ENDPOINT_TYPE_BULK:
@@ -196,7 +205,6 @@ class NSODriver:
         if self.out_endpoint is None:
             print("✗ Could not find bulk OUT endpoint")
             return False
-        
         return True
     
     def initialize_usb(self):
@@ -228,11 +236,15 @@ class NSODriver:
         print("  ✓ USB initialization complete\n")
         return True
     
-    def open_hid_device(self):
-        """Open HID device for reading input."""
+    def open_hid_device(self, device_index: int = 0):
+        """Open HID device for reading. device_index=0 for first, 1 for second, etc."""
         try:
+            devices = hid.enumerate(VID, PID)
+            if device_index >= len(devices):
+                return False
+            path = devices[device_index]['path']
             self.hid_device = hid.device()
-            self.hid_device.open(VID, PID)
+            self.hid_device.open_path(path)
             self.hid_device.set_nonblocking(True)
             print("✓ HID device opened")
             return True
@@ -510,7 +522,11 @@ class NSODriver:
                             try:
                                 # Store raw bytes for on-demand parsing (reduces latency)
                                 raw_state = {'raw_bytes': data_list, 'parsed': parsed}
-                                self.dsu_server.update(raw_state)
+                                self.dsu_server.update(
+                                    raw_state,
+                                    pad_id=getattr(self, 'dsu_pad_id', 0),
+                                    connection_type=getattr(self, 'dsu_connection_type', 0x01),
+                                )
                             except Exception as e:
                                 # Silently ignore DSU errors (client may not be connected)
                                 pass
@@ -541,7 +557,7 @@ class NSODriver:
         print("="*70)
         
         # Step 1: Find and initialize USB device
-        if not self.find_usb_device():
+        if not self.find_usb_device(self.device_index):
             print("✗ Failed to find USB device")
             return False
         
@@ -552,7 +568,7 @@ class NSODriver:
             return False
         
         # Step 2: Open HID device for reading
-        if not self.open_hid_device():
+        if not self.open_hid_device(self.device_index):
             print("✗ Failed to open HID device")
             print("  Make sure the device is initialized via USB first")
             return False
@@ -560,8 +576,8 @@ class NSODriver:
         # Step 2.5: Calibrate sticks (assume neutral position at startup)
         self.calibrate_sticks()
         
-        # Step 2.6: Start DSU server if requested
-        if self.dsu_server:
+        # Step 2.6: Start DSU server if requested (only when we own it)
+        if self.dsu_server and self._dsu_owned:
             if not self.dsu_server.start():
                 print("⚠️  DSU server failed to start", flush=True)
                 self.dsu_server = None
@@ -619,8 +635,8 @@ class NSODriver:
         """Stop the driver."""
         self.running = False
         
-        # Stop DSU server if running
-        if self.dsu_server:
+        # Stop DSU server only when we own it (single-controller mode)
+        if self.dsu_server and self._dsu_owned:
             self.dsu_server.stop()
         
         if self.hid_device:
@@ -996,7 +1012,11 @@ class NSOWirelessDriver(NSODriver):
         if self.dsu_server and self.dsu_server.running:
             try:
                 raw_state = {'raw_bytes': data_list, 'parsed': parsed}
-                self.dsu_server.update(raw_state)
+                self.dsu_server.update(
+                    raw_state,
+                    pad_id=getattr(self, 'dsu_pad_id', 0),
+                    connection_type=getattr(self, 'dsu_connection_type', 0x02),
+                )
             except Exception:
                 pass
 
@@ -1391,7 +1411,7 @@ class NSOWirelessDriver(NSODriver):
             print("✗ bleak not installed. Run: pip install bleak")
             return False
 
-        if self.dsu_server and not self.dsu_server.start():
+        if self.dsu_server and getattr(self, '_dsu_owned', True) and not self.dsu_server.start():
             print("⚠️  DSU server failed to start", flush=True)
             self.dsu_server = None
 
@@ -1462,7 +1482,7 @@ class NSOWirelessDriver(NSODriver):
     def stop(self):
         """Stop the wireless driver."""
         self.running = False
-        if self.dsu_server:
+        if self.dsu_server and getattr(self, '_dsu_owned', True):
             self.dsu_server.stop()
         if self.hid_device:
             self.hid_device.close()
@@ -1472,6 +1492,124 @@ class NSOWirelessDriver(NSODriver):
                 usb.util.dispose_resources(self.usb_device)
             except Exception:
                 pass
+        print("\nDriver stopped")
+
+
+def count_usb_controllers() -> int:
+    """Return number of NSO USB controllers connected."""
+    try:
+        return len(list(usb.core.find(find_all=True, idVendor=VID, idProduct=PID)))
+    except Exception:
+        return 0
+
+
+def count_hid_controllers() -> int:
+    """Return number of NSO HID devices (should match USB count)."""
+    try:
+        return len(hid.enumerate(VID, PID))
+    except Exception:
+        return 0
+
+
+class MultiControllerDriver:
+    """
+    Coordinates multiple controllers (USB and/or BLE) sharing one DSU server.
+    slots_config: list of dicts, each {slot: 0-3, type: 'usb'|'ble', address?: str for BLE}
+    """
+
+    def __init__(self, slots_config, use_dsu=True, use_gui=False, log_file=None, debug=False):
+        self.slots_config = slots_config
+        self.use_dsu = use_dsu and DSU_AVAILABLE
+        self.use_gui = use_gui and GUI_AVAILABLE
+        self.log_file = log_file
+        self.debug = debug
+        self.running = False
+        self.dsu_server = DSUServer() if self.use_dsu else None
+        self.drivers = []
+        self._threads = []
+
+    def _create_drivers(self):
+        """Create driver instances from slots_config."""
+        usb_index = 0
+        for cfg in self.slots_config:
+            slot = cfg.get('slot', 0)
+            ctype = cfg.get('type', 'usb')
+            if ctype == 'usb':
+                driver = NSODriver(
+                    use_gui=False,
+                    log_file=self.log_file,
+                    use_dsu=False,
+                    debug=self.debug,
+                    dsu_server=self.dsu_server,
+                    dsu_pad_id=slot,
+                    dsu_connection_type=0x01,
+                    device_index=usb_index,
+                )
+                driver._dsu_owned = False
+                usb_index += 1
+                self.drivers.append(driver)
+            elif ctype == 'ble':
+                addr = cfg.get('address', '')
+                driver = NSOWirelessDriver(
+                    mac_address=addr or None,
+                    use_gui=False,
+                    log_file=self.log_file,
+                    use_dsu=False,
+                    debug=self.debug,
+                    dsu_server=self.dsu_server,
+                    dsu_pad_id=slot,
+                    dsu_connection_type=0x02,
+                )
+                driver._dsu_owned = False
+                self.drivers.append(driver)
+
+    def start(self):
+        """Start all controllers. Each driver runs in its own thread."""
+        print("NSO GameCube Controller Bridge (Multi-Controller)")
+        print("=" * 70)
+        self._create_drivers()
+        if not self.drivers:
+            print("✗ No controllers configured")
+            return False
+
+        if self.dsu_server and not self.dsu_server.start():
+            print("⚠️  DSU server failed to start", flush=True)
+            self.dsu_server = None
+
+        self.running = True
+
+        def run_driver(d):
+            try:
+                d.start()
+            except Exception as e:
+                print(f"✗ Driver error: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+
+        for driver in self.drivers:
+            t = threading.Thread(target=run_driver, args=(driver,), daemon=True)
+            t.start()
+            self._threads.append(t)
+
+        print("✓ Multi-controller driver started")
+        print("\nDriver is running. Press Ctrl+C to stop.\n")
+        try:
+            while self.running:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.stop()
+        return True
+
+    def stop(self):
+        """Stop all drivers and DSU server."""
+        self.running = False
+        for driver in self.drivers:
+            driver.running = False
+            driver.stop()
+        if self.dsu_server:
+            self.dsu_server.stop()
+        self.drivers.clear()
+        self._threads.clear()
         print("\nDriver stopped")
 
 
@@ -1973,6 +2111,8 @@ def main():
                        help='Interactive BLE calibration: prompts for each button/stick; logs raw byte changes. Use with --ble (--address optional).')
     parser.add_argument('--free-dsu-port', action='store_true',
                        help='Kill process holding DSU port 26760 (for orphaned/zombie instances), then exit.')
+    parser.add_argument('--multi', action='store_true',
+                       help='Multi-controller mode. Reads slots config from app config dir.')
     args = parser.parse_args()
 
     if getattr(args, 'free_dsu_port', False):
@@ -2130,6 +2270,32 @@ def main():
     if args.ble_discover and not args.ble:
         print("✗ --ble-discover requires --ble. Use: python main.py --ble --ble-discover")
         return 1
+
+    if getattr(args, 'multi', False):
+        try:
+            from controller_storage import load_slots_config
+        except ImportError:
+            print("✗ Multi-controller requires controller_storage module")
+            return 1
+        slots_config = load_slots_config()
+        if not slots_config:
+            print("✗ No controllers configured. Use the launcher to assign slots.")
+            return 1
+        driver = MultiControllerDriver(
+            slots_config,
+            use_dsu=not getattr(args, 'no_dsu', False),
+            use_gui=False,
+            log_file=log_file,
+            debug=getattr(args, 'debug', False),
+        )
+        try:
+            driver.start()
+        except Exception as e:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+        return 0
 
     if args.ble:
         if not BLE_AVAILABLE:

@@ -23,6 +23,10 @@ def _last_connected_path():
     return os.path.join(_storage_dir(), "last_connected.json")
 
 
+def _slots_config_path():
+    return os.path.join(_storage_dir(), "slots_config.json")
+
+
 def load_controllers():
     """Load saved controllers. Returns list of {address, name}."""
     path = _controllers_path()
@@ -74,3 +78,22 @@ def set_last_connected(address):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump({"address": address}, f)
+
+
+def load_slots_config():
+    """Load multi-controller slots config. Returns list of {slot, type, address?}."""
+    path = _slots_config_path()
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data.get("slots", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_slots_config(slots):
+    """Save slots config. slots = [{slot: 0-3, type: 'usb'|'ble', address?: str}, ...]."""
+    path = _slots_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"slots": slots}, f, indent=2)
