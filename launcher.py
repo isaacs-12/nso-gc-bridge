@@ -37,8 +37,29 @@ def _get_script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _get_current_version():
+    """Current app version: from bundle plist when frozen, else from version_check."""
+    if getattr(sys, "frozen", False):
+        try:
+            import plistlib
+            exe_dir = os.path.dirname(sys.executable)
+            plist_path = os.path.join(exe_dir, "..", "Info.plist")
+            with open(plist_path, "rb") as f:
+                plist = plistlib.load(f)
+            return (plist.get("CFBundleShortVersionString") or plist.get("CFBundleVersion") or _VERSION_MODULE)
+        except Exception:
+            pass
+    return _VERSION_MODULE
+
+
 SCRIPT_DIR = _get_script_dir()
 os.chdir(SCRIPT_DIR)
+
+try:
+    from version_check import VERSION as _VERSION_MODULE, check_for_updates as _check_for_updates
+except ImportError:
+    _VERSION_MODULE = "1.0.0"
+    _check_for_updates = None
 
 try:
     from controller_storage import (
@@ -146,6 +167,16 @@ class LauncherApp:
         self.root.title("NSO GameCube Controller Bridge")
         self.root.minsize(420, 420)
         self.root.geometry("560x560")
+
+        # Use custom icon for window and dialogs (messagebox); keep reference so it is not GC'd
+        self._icon_photo = None
+        _icon_path = os.path.join(SCRIPT_DIR, "assets", "NSO_GC_BRIDGE.png")
+        if os.path.isfile(_icon_path):
+            try:
+                self._icon_photo = tk.PhotoImage(file=_icon_path)
+                self.root.iconphoto(True, self._icon_photo)
+            except Exception:
+                pass
 
         self.process = None  # subprocess when driver is running
         self.log_queue = queue.Queue()
@@ -260,6 +291,11 @@ class LauncherApp:
         self.send_enter_hint = ttk.Label(btn_frame, text="(Enter key or click when prompted)", foreground="gray")
         self.send_enter_hint.pack(side=tk.LEFT)
 
+        self.check_updates_lbl = ttk.Label(btn_frame, text="Check for updates", foreground="blue", cursor="hand2")
+        self.check_updates_lbl.pack(side=tk.RIGHT)
+        self.check_updates_lbl.bind("<Button-1>", lambda e: self._on_check_for_updates())
+        ToolTip(self.check_updates_lbl, "Compare this version with the latest GitHub release (requires internet).")
+
         # --- Log view ---
         log_frame = ttk.LabelFrame(main, text="Log", padding=5)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
@@ -275,6 +311,54 @@ class LauncherApp:
         self.root.bind("<KP_Enter>", self._on_enter_key)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Optional: delayed check on startup (non-blocking; only prompts if newer version exists)
+        if _check_for_updates:
+            self.root.after(2500, self._startup_version_check)
+
+    def _startup_version_check(self):
+        """Run version check in background once at startup; only show dialog if update available."""
+        def run():
+            result = _check_for_updates(_get_current_version()) if _check_for_updates else None
+            if result is None:
+                return
+            is_newer, latest_version, url = result
+            if not is_newer:
+                return
+            def show():
+                if messagebox.askyesno("Update available", f"A new version ({latest_version}) is available.\n\nOpen the releases page to download?", parent=self.root):
+                    try:
+                        import webbrowser
+                        webbrowser.open(url)
+                    except Exception:
+                        pass
+            self.root.after(0, show)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_check_for_updates(self):
+        """User clicked 'Check for updates'. Run check in background and show result."""
+        if not _check_for_updates:
+            messagebox.showinfo("Check for updates", "Update check is not available.", parent=self.root)
+            return
+        current = _get_current_version()
+        def run():
+            result = _check_for_updates(current)
+            def show():
+                if result is None:
+                    messagebox.showinfo("Check for updates", "Could not check for updates (no connection or try again later).", parent=self.root)
+                    return
+                is_newer, latest_version, url = result
+                if not is_newer:
+                    messagebox.showinfo("Check for updates", f"You're on the latest version ({current}).", parent=self.root)
+                    return
+                if messagebox.askyesno("Update available", f"A new version ({latest_version}) is available.\n\nOpen the releases page to download?", parent=self.root):
+                    try:
+                        import webbrowser
+                        webbrowser.open(url)
+                    except Exception:
+                        pass
+            self.root.after(0, show)
+        threading.Thread(target=run, daemon=True).start()
 
     def _build_multi_slots_ui(self):
         """Build the 4-slot grid for multi-controller mode."""

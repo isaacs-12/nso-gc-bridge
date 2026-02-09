@@ -1,4 +1,6 @@
-# NSO GameCube Controller Driver
+# The Original NSO GameCube Controller Driver
+
+With support for USB, Bluetooth, Multiple controllers, and rumble!
 
 ## Usage
 

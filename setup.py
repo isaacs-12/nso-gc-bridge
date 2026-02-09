@@ -18,7 +18,7 @@ VERSION = os.environ.get("VERSION", "1.0.0")
 COPYRIGHT = "Copyright © 2026 Isaac Smith"  # Shown in About dialog
 
 APP = ["launcher.py"]
-DATA_FILES = ["main.py", "dsu_server.py", "controller_storage.py"]
+DATA_FILES = ["main.py", "dsu_server.py", "controller_storage.py", "version_check.py"]
 
 
 def _find_tcl_tk_frameworks():
@@ -32,7 +32,9 @@ def _find_tcl_tk_frameworks():
 
 
 def _find_tcl_tk_resources():
-    """Find Tcl/Tk script directories to bundle (for Homebrew Python etc)."""
+    """Find Tcl/Tk script directories and assets to bundle (for Homebrew Python etc)."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    assets_dir = os.path.join(base_dir, "assets")
     try:
         import tkinter as tk
 
@@ -40,6 +42,8 @@ def _find_tcl_tk_resources():
         tcl_lib = tcl.eval("info library")
         base = os.path.dirname(os.path.dirname(tcl_lib))
         resources = list(DATA_FILES)
+        if os.path.isdir(assets_dir):
+            resources.append(assets_dir)
         for sub in ["tcl9.0", "tcl8.6", "tk9.0", "tk8.6"]:
             path = os.path.join(base, "lib", sub)
             if os.path.isdir(path):
@@ -48,7 +52,10 @@ def _find_tcl_tk_resources():
                     resources.append(path)
         return resources
     except Exception:
-        return DATA_FILES
+        resources = list(DATA_FILES)
+        if os.path.isdir(assets_dir):
+            resources.append(assets_dir)
+        return resources
 
 
 OPTIONS = {
