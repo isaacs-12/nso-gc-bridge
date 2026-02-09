@@ -104,10 +104,31 @@ DEFAULT_REPORT_DATA = [
     0x00, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 ]
 
-SET_LED_DATA = [
-    0x09, 0x91, 0x00, 0x07, 0x00, 0x08,
-    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-]
+# Player indicator LED masks (per NSO-GameCube-Controller-Pairing-App / BlueRetro protocol)
+# Player 1=0x01, 2=0x03, 3=0x05, 4=0x06
+LED_MAP = [0x01, 0x03, 0x05, 0x06, 0x07, 0x09, 0x0A, 0x0B]
+
+
+def build_led_data_usb(slot_index: int) -> bytes:
+    """Build LED command for USB (interface 0x00). Slot 0-3 = Player 1-4."""
+    led_mask = LED_MAP[min(slot_index, len(LED_MAP) - 1)]
+    return bytes([
+        0x09, 0x91, 0x00, 0x07, 0x00, 0x08,
+        0x00, 0x00, led_mask, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ])
+
+
+def build_led_cmd_ble(slot_index: int) -> bytes:
+    """Build LED command for BLE (interface 0x01). Must be sent to command channel (0x0014), not handshake char."""
+    led_mask = LED_MAP[min(slot_index, len(LED_MAP) - 1)]
+    return bytes([
+        0x09, 0x91, 0x01, 0x07, 0x00, 0x08, 0x00, 0x00,
+        led_mask, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ])
+
+
+# Legacy: single controller default (player 1)
+SET_LED_DATA = build_led_data_usb(0)
 
 # Subcommand 0x03: Set Input Mode — 0x30 = standard full reports (max report rate for dash dancing / short hops)
 SET_INPUT_MODE = bytearray([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30])
@@ -222,11 +243,12 @@ class NSODriver:
         except Exception as e:
             print(f"  ✗ Error sending default report: {e}")
             return False 
-        # Send LED report
+        # Send LED report (player indicator for port/slot)
         try:
+            led_data = build_led_data_usb(self.dsu_pad_id)
             transferred = self.usb_device.write(
                 self.out_endpoint,
-                SET_LED_DATA,
+                led_data,
                 timeout=1000
             )
             print(f"  ✓ LED report sent ({transferred} bytes)")
@@ -1159,6 +1181,19 @@ class NSOWirelessDriver(NSODriver):
             print(f"  {key}: bytes {indices}")
         print("=" * 70)
 
+    def _find_cmd_char(self, client):
+        """Find SW2 command channel (handle 0x0014). LED commands must go here, not handshake char.
+        Nintendo SW2 service has 3 WriteNoResp chars: rumble(0x0012), cmd(0x0014), cmd+rumble(0x0016).
+        Returns the 2nd WriteNoResp char by handle, or None if not found."""
+        for svc in client.services:
+            wnr = sorted(
+                [c for c in svc.characteristics
+                 if "write-without-response" in (getattr(c, "properties", []) or [])],
+                key=lambda c: getattr(c, "handle", 0))
+            if len(wnr) >= 3:
+                return wnr[1]
+        return None
+
     async def _try_handshake(self, addr):
         """Connect and try Nintendo BLE handshake on any writable characteristic; return True if one accepts."""
         try:
@@ -1295,10 +1330,13 @@ class NSOWirelessDriver(NSODriver):
                                 print("  Latency stats ([Latency] Avg/Jitter/Range) printed here every ~100 reports.")
                             for char in notify_chars:
                                 await client.start_notify(char.uuid, self._notification_handler)
-                            if handshake_char:
-                                for data in (bytearray(DEFAULT_REPORT_DATA), bytearray(SET_LED_DATA)):
+                            # Find command channel (0x0014): SW2 LED must go there, not handshake char
+                            cmd_char = self._find_cmd_char(client)
+                            init_char = cmd_char if cmd_char else handshake_char
+                            if init_char:
+                                for data in (bytearray(DEFAULT_REPORT_DATA), build_led_cmd_ble(self.dsu_pad_id)):
                                     try:
-                                        await client.write_gatt_char(handshake_char.uuid, data)
+                                        await client.write_gatt_char(init_char.uuid, data)
                                     except Exception:
                                         pass
                                 try:
@@ -1360,16 +1398,20 @@ class NSOWirelessDriver(NSODriver):
                                         pass
                             if not handshake_done:
                                 print("  (Handshake write failed on all write chars; continuing for input reports.)")
-                            if handshake_char:
-                                for data in (bytearray(DEFAULT_REPORT_DATA), bytearray(SET_LED_DATA)):
+                            # Find command channel (0x0014): SW2 LED must go there, not handshake char
+                            cmd_char = self._find_cmd_char(client)
+                            init_char = cmd_char if cmd_char else handshake_char
+                            if init_char:
+                                for data in (bytearray(DEFAULT_REPORT_DATA), build_led_cmd_ble(self.dsu_pad_id)):
                                     try:
-                                        await client.write_gatt_char(handshake_char.uuid, data)
+                                        await client.write_gatt_char(init_char.uuid, data)
                                     except Exception:
                                         pass
-                                try:
-                                    await client.write_gatt_char(handshake_char.uuid, SET_INPUT_MODE)
-                                except Exception:
-                                    pass
+                                if handshake_char:
+                                    try:
+                                        await client.write_gatt_char(handshake_char.uuid, SET_INPUT_MODE)
+                                    except Exception:
+                                        pass
                                 print("  ✓ Slot/LED report sent (controller may stop blinking)", flush=True)
                             try:
                                 from controller_storage import set_last_connected
