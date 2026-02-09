@@ -133,6 +133,17 @@ SET_LED_DATA = build_led_data_usb(0)
 # Subcommand 0x03: Set Input Mode — 0x30 = standard full reports (max report rate for dash dancing / short hops)
 SET_INPUT_MODE = bytearray([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x30])
 
+# Rumble command: 0x0A = vibration, 0x91, interface 0x00 (USB) or 0x01 (BLE)
+def build_rumble_cmd_usb(state: bool) -> bytes:
+    return bytes([0x0A, 0x91, 0x00, 0x02, 0x00, 0x04,
+                  0x00, 0x00, 0x01 if state else 0x00,
+                  0x00, 0x00, 0x00])
+
+def build_rumble_cmd_ble(state: bool) -> bytes:
+    return bytes([0x0A, 0x91, 0x01, 0x02, 0x00, 0x04,
+                  0x00, 0x00, 0x01 if state else 0x00,
+                  0x00, 0x00, 0x00])
+
 
 class NSODriver:
     """NSO GameCube Controller Driver."""
@@ -572,7 +583,27 @@ class NSODriver:
             # Yield to OS without hitting timer interrupt floor (time.sleep(0) on some systems)
             # HID is non-blocking, so we can poll aggressively
             time.sleep(0)  # Yield to OS scheduler
-    
+
+    def send_rumble(self, large_motor: int, small_motor: int):
+        """Send rumble to controller. GC has single motor; any non-zero = on."""
+        state = (large_motor > 0 or small_motor > 0)
+        if not self.usb_device or not self.out_endpoint:
+            return
+        cmd = build_rumble_cmd_usb(state)
+        try:
+            try:
+                usb.util.claim_interface(self.usb_device, INTERFACE_NUM)
+            except usb.core.USBError:
+                pass
+            self.usb_device.write(self.out_endpoint, cmd, 1000)
+        except Exception:
+            pass
+        finally:
+            try:
+                usb.util.release_interface(self.usb_device, INTERFACE_NUM)
+            except usb.core.USBError:
+                pass
+
     def start(self):
         """Start the driver."""
         print("NSO GameCube Controller Driver")
@@ -603,6 +634,10 @@ class NSODriver:
             if not self.dsu_server.start():
                 print("⚠️  DSU server failed to start", flush=True)
                 self.dsu_server = None
+
+        # Step 2.7: Register rumble callback for DSU (Dolphin rumble)
+        if self.dsu_server and self.dsu_server.running:
+            self.dsu_server.register_rumble_callback(self.dsu_pad_id, self.send_rumble)
         
         # Step 3: Start reading
         self.running = True
@@ -656,6 +691,10 @@ class NSODriver:
     def stop(self):
         """Stop the driver."""
         self.running = False
+
+        # Unregister rumble before stopping DSU
+        if self.dsu_server and self.dsu_server.running:
+            self.dsu_server.unregister_rumble_callback(self.dsu_pad_id)
         
         # Stop DSU server only when we own it (single-controller mode)
         if self.dsu_server and self._dsu_owned:
@@ -685,6 +724,8 @@ class NSOWirelessDriver(NSODriver):
         self._ble_calibration_samples = []
         self._ble_calibration_skip = 5  # skip first N reports before collecting stick center (avoid connection jitter)
         self._ble_loop = None
+        self._ble_client = None
+        self._ble_cmd_char = None
         self._discover_lock = threading.Lock()
         self._discover_samples = []  # list of (phase, data_list); max 300
         self._discover_phase = None
@@ -1194,6 +1235,24 @@ class NSOWirelessDriver(NSODriver):
                 return wnr[1]
         return None
 
+    def send_rumble(self, large_motor: int, small_motor: int):
+        """Send rumble over BLE. Schedules async write on BLE loop."""
+        state = (large_motor > 0 or small_motor > 0)
+        if not self._ble_loop or not self._ble_client or not self._ble_cmd_char:
+            return
+        if not self._ble_client.is_connected:
+            return
+        async def _do_rumble():
+            try:
+                await self._ble_client.write_gatt_char(
+                    self._ble_cmd_char.uuid, build_rumble_cmd_ble(state), response=False)
+            except Exception:
+                pass
+        try:
+            asyncio.run_coroutine_threadsafe(_do_rumble(), self._ble_loop)
+        except Exception:
+            pass
+
     async def _try_handshake(self, addr):
         """Connect and try Nintendo BLE handshake on any writable characteristic; return True if one accepts."""
         try:
@@ -1333,6 +1392,8 @@ class NSOWirelessDriver(NSODriver):
                             # Find command channel (0x0014): SW2 LED must go there, not handshake char
                             cmd_char = self._find_cmd_char(client)
                             init_char = cmd_char if cmd_char else handshake_char
+                            self._ble_client = client
+                            self._ble_cmd_char = cmd_char
                             if init_char:
                                 for data in (bytearray(DEFAULT_REPORT_DATA), build_led_cmd_ble(self.dsu_pad_id)):
                                     try:
@@ -1352,6 +1413,8 @@ class NSOWirelessDriver(NSODriver):
                             while self.running:
                                 await asyncio.sleep(0.1)
                         finally:
+                            self._ble_client = None
+                            self._ble_cmd_char = None
                             try:
                                 await client.disconnect()
                             except Exception:
@@ -1401,6 +1464,8 @@ class NSOWirelessDriver(NSODriver):
                             # Find command channel (0x0014): SW2 LED must go there, not handshake char
                             cmd_char = self._find_cmd_char(client)
                             init_char = cmd_char if cmd_char else handshake_char
+                            self._ble_client = client
+                            self._ble_cmd_char = cmd_char
                             if init_char:
                                 for data in (bytearray(DEFAULT_REPORT_DATA), build_led_cmd_ble(self.dsu_pad_id)):
                                     try:
@@ -1418,8 +1483,12 @@ class NSOWirelessDriver(NSODriver):
                                 set_last_connected(self.address)
                             except Exception:
                                 pass
-                            while self.running:
-                                await asyncio.sleep(0.1)
+                            try:
+                                while self.running:
+                                    await asyncio.sleep(0.1)
+                            finally:
+                                self._ble_client = None
+                                self._ble_cmd_char = None
                         break
                 except asyncio.CancelledError:
                     break
@@ -1456,6 +1525,9 @@ class NSOWirelessDriver(NSODriver):
         if self.dsu_server and getattr(self, '_dsu_owned', True) and not self.dsu_server.start():
             print("⚠️  DSU server failed to start", flush=True)
             self.dsu_server = None
+
+        if self.dsu_server and self.dsu_server.running:
+            self.dsu_server.register_rumble_callback(self.dsu_pad_id, self.send_rumble)
 
         self.running = True
 
@@ -1524,6 +1596,8 @@ class NSOWirelessDriver(NSODriver):
     def stop(self):
         """Stop the wireless driver."""
         self.running = False
+        if self.dsu_server and self.dsu_server.running:
+            self.dsu_server.unregister_rumble_callback(self.dsu_pad_id)
         if self.dsu_server and getattr(self, '_dsu_owned', True):
             self.dsu_server.stop()
         if self.hid_device:

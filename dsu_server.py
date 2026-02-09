@@ -12,7 +12,42 @@ import zlib
 import time
 import threading
 import subprocess
-from typing import Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set
+
+
+def send_test_rumble(port: int = 26760, slot: int = 0, duration_ms: int = 500) -> bool:
+    """Send a test rumble burst to the DSU server (for Test Rumble button).
+    Sends ON, waits duration_ms, then OFF. Returns True if packets were sent."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.5)
+        # Build DSU rumble packet: DSUC header + 0x110002 + 10-byte payload
+        def build_rumble_packet(intensity: int) -> bytes:
+            payload = bytearray(10)
+            payload[0] = 1  # slot-based
+            payload[1] = slot & 0x03
+            payload[8] = 0  # motor_id
+            payload[9] = intensity & 0xFF
+            # Header: magic, version, length, crc, server_id, msg_type
+            pkt = bytearray(30)
+            pkt[0:4] = b'DSUC'
+            struct.pack_into('<H', pkt, 4, 1001)
+            struct.pack_into('<H', pkt, 6, 14)  # 4 (msg type) + 10 (payload)
+            struct.pack_into('<I', pkt, 12, 0)
+            struct.pack_into('<I', pkt, 16, 0x110002)
+            pkt[20:30] = payload
+            pkt[8:12] = b'\x00\x00\x00\x00'
+            crc = zlib.crc32(bytes(pkt)) & 0xFFFFFFFF
+            struct.pack_into('<I', pkt, 8, crc)
+            return bytes(pkt)
+        addr = ('127.0.0.1', port)
+        sock.sendto(build_rumble_packet(255), addr)
+        time.sleep(duration_ms / 1000.0)
+        sock.sendto(build_rumble_packet(0), addr)
+        sock.close()
+        return True
+    except Exception:
+        return False
 
 
 def free_orphaned_port(port: int = 26760) -> bool:
@@ -55,7 +90,8 @@ class DSUServer:
     PACKET_TYPE_VERSION = 0x00100000  # Changed from 0x01000000
     PACKET_TYPE_PAD_INFO = 0x00100001  # Changed from 0x01000001
     PACKET_TYPE_PAD_DATA = 0x00100002  # Changed from 0x01000002
-    
+    PACKET_TYPE_RUMBLE = 0x110002  # Unofficial: rumble controller motor
+
     def __init__(self, server_id: int = 0):
         self.server_id = server_id
         self.socket = None
@@ -67,6 +103,8 @@ class DSUServer:
         self.pending_presses_by_slot: Dict[int, Set[str]] = {}
         self.thread = None
         self._logged_clients = set()
+        # Rumble: pad_id -> callback(large_motor, small_motor)
+        self._rumble_callbacks: Dict[int, Callable[[int, int], None]] = {}
         # Pre-allocate packet buffers to avoid GC pressure
         self._pad_data_buffer = bytearray(100)
         self._version_buffer = bytearray(24)
@@ -486,6 +524,38 @@ class DSUServer:
         
         self.last_state_by_slot[pad_id] = state_with_meta
     
+    def register_rumble_callback(self, pad_id: int, callback: Callable[[int, int], None]):
+        """Register a rumble callback for a pad. Called when Dolphin sends rumble (0x110002)."""
+        self._rumble_callbacks[pad_id] = callback
+
+    def unregister_rumble_callback(self, pad_id: int):
+        """Unregister rumble callback when driver stops."""
+        self._rumble_callbacks.pop(pad_id, None)
+
+    def _handle_rumble(self, data: bytes):
+        """Handle rumble packet (0x110002). Payload at offset 20: flags, slot, pad, motor_id, intensity."""
+        if len(data) < 30:
+            return
+        payload = data[20:30]
+        flags = payload[0]
+        slot = payload[1] & 0x03
+        motor_id = payload[8]
+        intensity = payload[9]
+        cb = self._rumble_callbacks.get(slot)
+        if not cb:
+            return
+        # GC controller has single motor; treat as large_motor (motor 0) and small_motor (motor 1)
+        if motor_id == 0:
+            large_motor = intensity
+            small_motor = 0
+        else:
+            large_motor = 0
+            small_motor = intensity
+        try:
+            cb(large_motor, small_motor)
+        except Exception:
+            pass
+
     def _get_requested_slots(self, data: bytes) -> set:
         """Parse Pad Data Request to get which slots the client wants. Returns set of slot ids (0-3)."""
         if len(data) < 22:
@@ -544,6 +614,9 @@ class DSUServer:
                             if addr not in self._logged_clients:
                                 print(f"✓ Dolphin connected", flush=True)
                                 self._logged_clients.add(addr)
+
+                        elif msg_type == self.PACKET_TYPE_RUMBLE:
+                            self._handle_rumble(data)
             
             except socket.timeout:
                 current_time = time.time()

@@ -250,6 +250,10 @@ class LauncherApp:
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 5))
         ToolTip(self.stop_btn, "Stop the running driver.")
 
+        self.rumble_btn = ttk.Button(btn_frame, text="Test Rumble", command=self._on_test_rumble, state=tk.DISABLED)
+        self.rumble_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(self.rumble_btn, "Send a short rumble burst to the controller (driver must be running).")
+
         self.send_enter_btn = ttk.Button(btn_frame, text="Send Enter", command=self._on_send_enter, state=tk.DISABLED)
         self.send_enter_btn.pack(side=tk.LEFT, padx=(0, 5))
         ToolTip(self.send_enter_btn, "Advance interactive prompts (Find BLE controller). Or press Enter key.")
@@ -490,6 +494,19 @@ class LauncherApp:
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
 
+    def _on_test_rumble(self):
+        """Send a test rumble packet to the DSU server (runs in background)."""
+        def do_rumble():
+            try:
+                from dsu_server import send_test_rumble, DSUServer
+                if send_test_rumble(port=DSUServer.DSU_PORT, slot=0, duration_ms=500):
+                    self.log_queue.put(("append", "✓ Rumble test sent\n"))
+                else:
+                    self.log_queue.put(("append", "✗ Rumble test failed (is driver running?)\n"))
+            except Exception as e:
+                self.log_queue.put(("append", f"✗ Rumble test error: {e}\n"))
+        threading.Thread(target=do_rumble, daemon=True).start()
+
     def _on_free_port(self):
         """Kill process holding DSU port 26760."""
         try:
@@ -648,6 +665,7 @@ class LauncherApp:
     def _set_running(self, running):
         self.start_btn.config(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
+        self.rumble_btn.config(state=tk.NORMAL if running else tk.DISABLED)
         # Send Enter enabled when process runs and has stdin (scan-diff)
         has_stdin = running and self.process and self.process.stdin is not None
         self.send_enter_btn.config(state=tk.NORMAL if has_stdin else tk.DISABLED)
